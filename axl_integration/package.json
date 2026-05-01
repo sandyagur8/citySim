@@ -1,0 +1,23 @@
+{
+  "name": "axl_integration",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@ensdomains/ensjs": "^4.2.2",
+    "@types/node": "^25.6.0",
+    "dotenv": "^17.4.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3",
+    "viem": "^2.48.7"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
+  }
+}

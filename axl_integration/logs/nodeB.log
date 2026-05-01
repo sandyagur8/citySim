@@ -1,0 +1,15 @@
+[node] Loaded node config from ../axl_integration/nodeB-config.json
+[node] Max message size: 16777216 bytes
+[node] Max concurrent connections: 128
+[node] Connection read timeout: 1m0s
+[node] Connection idle timeout: 5m0s
+[node] Configured peer: tcp://127.0.0.1:7000
+[node] Gensyn Node Started!
+[node] Our IPv6: 201:70b8:d8be:1531:33ce:9543:4f25:847f
+[node] Our Public Key: 63d1c9d07ab3b30c5aaf2c369ee00ae1b264c63194856401049570c1562798cc
+[node] TCP listener started on 127.0.0.1:7001
+Listening on 127.0.0.1:9012
+TCP Listener started on port 7000
+[node] Connected outbound: 203:2d9:1a0a:db80:8a71:adfb:4d7e:db8f@127.0.0.1:7000, source 127.0.0.1:50118
+2026/05/02 00:53:27 Connection from peer 1fd26e5f5247f758...
+2026/05/02 00:53:44 Connection from peer 1fd26e5f5247f758...
