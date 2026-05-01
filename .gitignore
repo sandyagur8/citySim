@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.venv/
+venv/
+env/
+.env
+.env.local
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+.vite/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+
+# Editors
+.idea/
+.vscode/
+
+# Project
+data/
+runs/
+*.parquet
+*.duckdb
