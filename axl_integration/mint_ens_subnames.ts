@@ -43,6 +43,10 @@ async function main() {
   const env = loadLocalEnv();
   const mnemonic = process.env.MNEMONIC || env.MNEMONIC;
   const rpc = process.env.RPC_URL || env.RPC_URL;
+  const fallbackRpc =
+    process.env.RPC_URL_FALLBACK ||
+    env.RPC_URL_FALLBACK ||
+    'https://sepolia.infura.io/v3/7d057f5911fc425089e1875e10c12554';
   if (!mnemonic || !rpc) {
     throw new Error('MNEMONIC and RPC_URL required in env');
   }
@@ -51,26 +55,52 @@ async function main() {
   const resolverAddress = (process.env.ENS_PUBLIC_RESOLVER_ADDRESS || '0x8FADE66B79cC9f707aB26799354482EB93a5B7dD') as `0x${string}`;
 
   const account = mnemonicToAccount(mnemonic);
-  const publicClient = createPublicClient({
+  let activeRpc = rpc;
+  let publicClient = createPublicClient({
     chain: addEnsContracts(sepolia),
-    transport: http(rpc),
+    transport: http(activeRpc),
   });
-  const walletClient = createWalletClient({
+  let walletClient = createWalletClient({
     account,
     chain: addEnsContracts(sepolia),
-    transport: http(rpc),
+    transport: http(activeRpc),
   });
+  console.error(`[mint] rpc=${safeRpcLabel(activeRpc)}`);
 
   const results: MintResult[] = [];
   const skipParentCheck = process.env.ENS_SKIP_PARENT_CHECK === '1';
   if (jobs.length && !skipParentCheck) {
     console.error(`[mint] checking parent ownership for ${jobs[0].ens_name}`);
-    await withRetry(
-      () => ensureParentOwnership(jobs[0].ens_name, publicClient, walletClient, account.address),
-      5,
-      1200,
-      'parent-ownership',
-    );
+    try {
+      await withRetry(
+        () => ensureParentOwnership(jobs[0].ens_name, publicClient, walletClient, account.address),
+        5,
+        1200,
+        'parent-ownership',
+      );
+    } catch (e) {
+      if (fallbackRpc && fallbackRpc !== activeRpc) {
+        console.error(`[mint] switching rpc -> ${safeRpcLabel(fallbackRpc)}`);
+        activeRpc = fallbackRpc;
+        publicClient = createPublicClient({
+          chain: addEnsContracts(sepolia),
+          transport: http(activeRpc),
+        });
+        walletClient = createWalletClient({
+          account,
+          chain: addEnsContracts(sepolia),
+          transport: http(activeRpc),
+        });
+        await withRetry(
+          () => ensureParentOwnership(jobs[0].ens_name, publicClient, walletClient, account.address),
+          5,
+          1200,
+          'parent-ownership-fallback',
+        );
+      } else {
+        throw e;
+      }
+    }
   } else if (jobs.length && skipParentCheck) {
     console.error('[mint] skipping parent ownership check (ENS_SKIP_PARENT_CHECK=1)');
   }
@@ -207,8 +237,15 @@ main().catch((e) => {
 
 function loadLocalEnv(): Record<string, string> {
   const out: Record<string, string> = {};
-  const p = '.env';
-  if (!fs.existsSync(p)) return out;
+  const candidates = ['.env', `${__dirname}/.env`];
+  let p: string | null = null;
+  for (const c of candidates) {
+    if (fs.existsSync(c)) {
+      p = c;
+      break;
+    }
+  }
+  if (!p) return out;
   const raw = fs.readFileSync(p, 'utf-8');
   for (const line of raw.split(/\r?\n/)) {
     const s = line.trim();
@@ -217,6 +254,15 @@ function loadLocalEnv(): Record<string, string> {
     out[k.trim()] = rest.join('=').trim().replace(/^['"]|['"]$/g, '');
   }
   return out;
+}
+
+function safeRpcLabel(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.host}${u.pathname}`;
+  } catch {
+    return url;
+  }
 }
 
 async function ensureParentOwnership(

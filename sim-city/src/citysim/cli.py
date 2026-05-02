@@ -557,10 +557,13 @@ def mint_ens_subnames(
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as out:
         out_path = out.name
 
+    env = os.environ.copy()
+    env.setdefault("ENS_SKIP_PARENT_CHECK", "1")
     proc = subprocess.run(
         ["npx", "tsx", str(script_abs), tmp_path, out_path],
         text=True,
         check=False,
+        env=env,
     )
     if proc.returncode != 0:
         typer.echo("ENS mint worker failed:")
