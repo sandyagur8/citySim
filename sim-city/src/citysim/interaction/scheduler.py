@@ -43,7 +43,7 @@ from citysim.interaction.runner import (
     pick_random_store,
     run_dialogue,
 )
-from citysim.interaction.transport import AxlTransport, LocalTransport, Transport
+from citysim.interaction.transport import AxlTransport, LocalTransport
 from citysim.product import ProductBrief, load_product, matches_target
 from citysim.server.sim import record_dialogue_error
 from citysim.store import EventLog
@@ -158,7 +158,6 @@ async def dialogue_worker(
         "yes",
         "on",
     }
-    transport: Transport = AxlTransport.from_env() if transport_kind == "axl" else LocalTransport()
 
     brief = load_product()
     # Note the file's mtime so we can hot-reload when the REST CRUD endpoints
@@ -288,7 +287,7 @@ async def dialogue_worker(
                 arm=arm,
                 targeted=targeted,
                 on_event=on_event,
-                transport=transport,
+                transport=AxlTransport.from_env() if transport_kind == "axl" else LocalTransport(),
                 transport_required=transport_required,
             )
             log.debug(

@@ -18,7 +18,9 @@ import json
 import logging
 import os
 import http
+import subprocess
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -57,6 +59,7 @@ def create_app(
     sim_holder: dict[str, SimState] = {}
     tick_task: dict[str, asyncio.Task[Any]] = {}
     dialogue_tasks: list[asyncio.Task[Any]] = []
+    axl_node_processes: list[subprocess.Popen[Any]] = []
     on_event_holder: dict[str, Any] = {}
     desired_dialogue_workers = max(
         1,
@@ -102,6 +105,81 @@ def create_app(
         env_val = os.environ.get("CITYSIM_AUTO_DIALOGUE", "1").strip().lower()
         auto_dialogue = env_val not in {"0", "false", "no", "off"}
 
+    autos_spawn_axl = os.environ.get("CITYSIM_AXL_AUTOSPAWN", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    desired_axl_nodes = max(1, int(os.environ.get("CITYSIM_AXL_NODE_COUNT", "2")))
+    repo_root = Path(__file__).resolve().parents[4]
+    axl_bin = repo_root / "axl" / "node"
+    axl_cfg_dir = repo_root / "axl_integration"
+
+    def _discover_node_configs() -> list[Path]:
+        cfgs = sorted(axl_cfg_dir.glob("node*-config.json"))
+        return cfgs
+
+    def _config_port(cfg_path: Path) -> int | None:
+        try:
+            raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+            return int(raw.get("api_port"))
+        except Exception:
+            return None
+
+    async def _reconcile_axl_nodes(target_count: int) -> None:
+        nonlocal desired_axl_nodes
+        desired_axl_nodes = max(1, target_count)
+        os.environ["CITYSIM_AXL_NODE_COUNT"] = str(desired_axl_nodes)
+        if not autos_spawn_axl:
+            return
+
+        cfgs = _discover_node_configs()
+        if not cfgs:
+            log.warning("AXL autospawn enabled but no node configs found in %s", axl_cfg_dir)
+            return
+        target = min(desired_axl_nodes, len(cfgs))
+        if desired_axl_nodes > len(cfgs):
+            log.warning("Requested %d AXL nodes, only %d configs found", desired_axl_nodes, len(cfgs))
+
+        current = len(axl_node_processes)
+        if target > current:
+            for i in range(current, target):
+                cfg = cfgs[i]
+                if not axl_bin.exists():
+                    log.warning("AXL binary not found at %s", axl_bin)
+                    break
+                p = subprocess.Popen(  # noqa: S603
+                    [str(axl_bin), "-config", str(cfg)],
+                    cwd=str(axl_bin.parent),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                axl_node_processes.append(p)
+                log.info("AXL node spawned cfg=%s pid=%s", cfg.name, p.pid)
+            await asyncio.sleep(0.4)
+        elif target < current:
+            to_stop = axl_node_processes[target:]
+            del axl_node_processes[target:]
+            for p in to_stop:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            await asyncio.sleep(0.2)
+            for p in to_stop:
+                try:
+                    if p.poll() is None:
+                        p.kill()
+                except Exception:
+                    pass
+            log.info("AXL nodes reduced. active=%d", len(axl_node_processes))
+
+        active_cfgs = cfgs[: len(axl_node_processes)]
+        ports = [str(p) for p in (_config_port(c) for c in active_cfgs) if p is not None]
+        if ports:
+            os.environ["CITYSIM_AXL_NODE_PORTS"] = ",".join(ports)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         log.info("Building sim with n_agents=%d grid_size=%d", n_agents, grid_size)
@@ -137,6 +215,7 @@ def create_app(
                 loop.call_soon_threadsafe(_apply)
 
             on_event_holder["cb"] = _on_event
+            await _reconcile_axl_nodes(desired_axl_nodes)
             await _reconcile_dialogue_workers(desired_dialogue_workers)
             log.info("Auto-dialogue worker pool ready (live event stream enabled)")
         else:
@@ -155,6 +234,18 @@ def create_app(
                 try:
                     await t
                 except (asyncio.CancelledError, Exception):
+                    pass
+            for p in axl_node_processes:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            await asyncio.sleep(0.2)
+            for p in axl_node_processes:
+                try:
+                    if p.poll() is None:
+                        p.kill()
+                except Exception:
                     pass
 
     app = FastAPI(title="Sim-city", lifespan=lifespan)
@@ -395,6 +486,12 @@ def create_app(
                     except (ValueError, TypeError):
                         continue
                     await _reconcile_dialogue_workers(target)
+                elif msg.get("type") == "set_axl_node_count":
+                    try:
+                        target = int(msg.get("value", desired_axl_nodes))
+                    except (ValueError, TypeError):
+                        continue
+                    await _reconcile_axl_nodes(target)
                 else:
                     apply_control(sim, msg)
 

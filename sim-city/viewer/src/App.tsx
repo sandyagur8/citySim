@@ -131,6 +131,7 @@ export default function App() {
         <ProductSetup
           initial={product}
           onSetConcurrentAgents={(n) => send({ type: 'set_dialogue_workers', value: n })}
+          onSetAxlNodeCount={(n) => send({ type: 'set_axl_node_count', value: n })}
           onClose={() => setProductSetupOpen(false)}
           onSaved={() => {
             // useSimStream will refresh `product` from the WS broadcast.

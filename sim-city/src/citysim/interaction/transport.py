@@ -28,6 +28,9 @@ class LocalTransport:
 class AxlTransport:
     node_a_port: int = 9002
     node_b_port: int = 9012
+    node_ports_csv: str = ""
+    node_peer_ids_csv: str = ""
+    node_count: int = 2
     timeout_s: float = 10.0
     poll_interval_s: float = 0.2
     send_retries: int = 2
@@ -40,6 +43,9 @@ class AxlTransport:
         return cls(
             node_a_port=int(os.environ.get("CITYSIM_AXL_NODE_A_PORT", "9002")),
             node_b_port=int(os.environ.get("CITYSIM_AXL_NODE_B_PORT", "9012")),
+            node_ports_csv=os.environ.get("CITYSIM_AXL_NODE_PORTS", "").strip(),
+            node_peer_ids_csv=os.environ.get("CITYSIM_AXL_NODE_PEER_IDS", "").strip(),
+            node_count=max(1, int(os.environ.get("CITYSIM_AXL_NODE_COUNT", "2"))),
             timeout_s=float(os.environ.get("CITYSIM_AXL_TIMEOUT_S", "10")),
             poll_interval_s=float(os.environ.get("CITYSIM_AXL_POLL_INTERVAL_S", "0.2")),
             send_retries=int(os.environ.get("CITYSIM_AXL_SEND_RETRIES", "2")),
@@ -48,10 +54,34 @@ class AxlTransport:
             node_b_peer_id=os.environ.get("CITYSIM_AXL_NODE_B_PEER_ID", "").strip(),
         )
 
+    def _node_ports(self) -> list[int]:
+        if self.node_ports_csv:
+            vals: list[int] = []
+            for raw in self.node_ports_csv.split(","):
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    vals.append(int(raw))
+                except ValueError:
+                    continue
+            if vals:
+                return vals[: max(1, self.node_count)]
+        return [self.node_a_port, self.node_b_port][: max(1, self.node_count)]
+
+    def _node_peer_ids(self) -> list[str]:
+        if self.node_peer_ids_csv:
+            vals = [v.strip() for v in self.node_peer_ids_csv.split(",") if v.strip()]
+            if vals:
+                return vals[: max(1, self.node_count)]
+        fallback = [self.node_a_peer_id, self.node_b_peer_id]
+        return fallback[: max(1, self.node_count)]
+
     def _port_for(self, agent: Persona) -> int:
-        # Simple shard: even id -> node A, odd id -> node B.
+        # Agent shard over active node port list.
         idx = int(agent.agent_id[1:]) if agent.agent_id[1:].isdigit() else 0
-        return self.node_a_port if idx % 2 == 0 else self.node_b_port
+        ports = self._node_ports()
+        return ports[idx % len(ports)]
 
     def _is_peer_id(self, value: str | None) -> bool:
         if not value:
@@ -59,17 +89,18 @@ class AxlTransport:
         return bool(re.fullmatch(r"[0-9a-fA-F]{64}", value.strip()))
 
     def _destination_peer_id(self, to_agent: Persona, receiver_port: int) -> str:
-        # Preferred: explicit node peer-id mapping by receiver shard.
-        if receiver_port == self.node_a_port and self._is_peer_id(self.node_a_peer_id):
-            return self.node_a_peer_id
-        if receiver_port == self.node_b_port and self._is_peer_id(self.node_b_peer_id):
-            return self.node_b_peer_id
+        ports = self._node_ports()
+        peers = self._node_peer_ids()
+        if receiver_port in ports:
+            i = ports.index(receiver_port)
+            if i < len(peers) and self._is_peer_id(peers[i]):
+                return peers[i]
         # Fallback: use persona axl_key only if it looks like a real peer id.
         if self._is_peer_id(to_agent.axl_key):
             return to_agent.axl_key.strip()
         raise RuntimeError(
             f"Missing valid destination peer id for {to_agent.agent_id}. "
-            "Set CITYSIM_AXL_NODE_A_PEER_ID and CITYSIM_AXL_NODE_B_PEER_ID."
+            "Set CITYSIM_AXL_NODE_PEER_IDS (or legacy A/B peer-id vars)."
         )
 
     def send(self, from_agent: Persona, to_agent: Persona, payload: str) -> str:

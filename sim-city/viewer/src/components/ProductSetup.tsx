@@ -22,6 +22,7 @@ type Props = {
   onClose: () => void;
   onSaved: (b: ProductBriefDict) => void;
   onSetConcurrentAgents: (n: number) => void;
+  onSetAxlNodeCount: (n: number) => void;
 };
 
 function Toggle({
@@ -51,6 +52,7 @@ export function ProductSetup({
   onClose,
   onSaved,
   onSetConcurrentAgents,
+  onSetAxlNodeCount,
 }: Props) {
   const [brief, setBrief] = useState<ProductBriefDict>(
     initial ?? emptyProductBrief(),
@@ -61,6 +63,7 @@ export function ProductSetup({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [concurrentAgents, setConcurrentAgents] = useState<number>(1);
+  const [axlNodeCount, setAxlNodeCount] = useState<number>(2);
 
   useEffect(() => {
     if (initial) {
@@ -120,6 +123,7 @@ export function ProductSetup({
       };
       const saved = await saveProduct(payload);
       onSetConcurrentAgents(Math.max(1, Math.floor(concurrentAgents || 1)));
+      onSetAxlNodeCount(Math.max(1, Math.floor(axlNodeCount || 1)));
       onSaved(saved);
       onClose();
     } catch (err) {
@@ -249,6 +253,23 @@ export function ProductSetup({
               />
               <p className="mt-1 text-[11px] text-neutral-500">
                 Runtime tuning. Higher value = more parallel conversations.
+              </p>
+            </label>
+            <label className="block sm:col-span-2">
+              <span className="text-xs uppercase tracking-wider text-neutral-400">
+                AXL node count
+              </span>
+              <input
+                type="number"
+                min={1}
+                max={16}
+                step={1}
+                className="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
+                value={axlNodeCount}
+                onChange={(e) => setAxlNodeCount(parseInt(e.target.value || '2', 10))}
+              />
+              <p className="mt-1 text-[11px] text-neutral-500">
+                Used by backend autospawn when enabled (CITYSIM_AXL_AUTOSPAWN=1).
               </p>
             </label>
           </div>
