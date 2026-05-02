@@ -13,6 +13,7 @@ import asyncio
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
 from citysim.store import PersonaStore
 from citysim.world.agents import MODE_SPEED, Agent
@@ -22,7 +23,7 @@ from citysim.world.personas import Persona, load_or_generate_personas
 from citysim.world.schedule import ACTIVITY_CODES, Activity, Intention, plan_day
 
 # How often (in sim minutes) to broadcast position deltas.
-# Lower = smoother animation at high speed multipliers (e.g. 1440× / 1-min days).
+# Lower = smoother animation at high speed multipliers (e.g. 1440x / 1-min days).
 BROADCAST_EVERY_SIM_MIN = 2
 
 # Real-second cadence of the tick loop. We advance sim_time by speed * dt
@@ -48,7 +49,7 @@ class SimState:
     paused: bool = False
 
     # Subscribers (asyncio queues of dict messages)
-    subscribers: set[asyncio.Queue] = field(default_factory=set)
+    subscribers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
 
     # Bookkeeping
     last_broadcast_min: float = -10.0
@@ -76,7 +77,11 @@ def build_sim(
     if store is None:
         store = PersonaStore()
     personas = load_or_generate_personas(
-        grid, establishments, n=n_agents, seed=seed, store=store,
+        grid,
+        establishments,
+        n=n_agents,
+        seed=seed,
+        store=store,
         force_regenerate=force_regenerate,
     )
     agents = [p.to_agent() for p in personas]
@@ -147,8 +152,8 @@ def snapshot_positions(sim: SimState) -> list[list[float | int]]:
     return out
 
 
-async def broadcast(sim: SimState, message: dict) -> None:
-    dead: list[asyncio.Queue] = []
+async def broadcast(sim: SimState, message: dict[str, Any]) -> None:
+    dead: list[asyncio.Queue[dict[str, Any]]] = []
     for q in sim.subscribers:
         try:
             q.put_nowait(message)
@@ -198,7 +203,7 @@ async def tick_loop(sim: SimState) -> None:
             )
 
 
-def init_payload(sim: SimState) -> dict:
+def init_payload(sim: SimState) -> dict[str, Any]:
     """Initial message sent on a new WebSocket connection."""
     return {
         "type": "init",
@@ -217,7 +222,7 @@ def init_payload(sim: SimState) -> dict:
     }
 
 
-def apply_control(sim: SimState, message: dict) -> None:
+def apply_control(sim: SimState, message: dict[str, Any]) -> None:
     """Apply a client-sent control message in-place."""
     kind = message.get("type")
     if kind == "set_speed":
@@ -233,5 +238,5 @@ def apply_control(sim: SimState, message: dict) -> None:
         pass
 
 
-def iter_subscribers(sim: SimState) -> Iterable[asyncio.Queue]:
+def iter_subscribers(sim: SimState) -> Iterable[asyncio.Queue[dict[str, Any]]]:
     return list(sim.subscribers)

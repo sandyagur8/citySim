@@ -67,7 +67,11 @@ def regen_personas(
     grid = generate_grid(size=grid_size, seed=seed)
     establishments = place_establishments(grid, seed=seed)
     personas = load_or_generate_personas(
-        grid, establishments, n=n_agents, seed=seed, store=store,
+        grid,
+        establishments,
+        n=n_agents,
+        seed=seed,
+        store=store,
         force_regenerate=True,
     )
     typer.echo(f"Generated {len(personas):,} personas → {store.path}")
@@ -119,6 +123,7 @@ def run_dialogue_cmd(
     import random as _random
 
     from citysim.interaction import (
+        DialogueTurn,
         find_employee,
         pick_random_buyer,
         pick_random_store,
@@ -157,7 +162,9 @@ def run_dialogue_cmd(
         store, seller = picked
 
     typer.echo("")
-    typer.echo(f"Buyer:  {buyer.agent_id} — {buyer.age} {buyer.gender} {buyer.occupation} ({buyer.income_band})")
+    typer.echo(
+        f"Buyer:  {buyer.agent_id} — {buyer.age} {buyer.gender} {buyer.occupation} ({buyer.income_band})"
+    )
     typer.echo(f"        {buyer.card_text}")
     typer.echo(f"Seller: {seller.agent_id} — {seller.occupation} at {store.kind.value}")
     typer.echo(f"        {seller.card_text}")
@@ -165,10 +172,8 @@ def run_dialogue_cmd(
     typer.echo(f"Running dialogue (≤{max_turns} turns) on local Llama...")
     typer.echo("")
 
-    def _print_turn(turn: object) -> None:
-        speaker = getattr(turn, "speaker", "?")
-        text = getattr(turn, "text", "")
-        typer.echo(f"  {speaker.upper()}: {text}")
+    def _print_turn(turn: DialogueTurn) -> None:
+        typer.echo(f"  {turn.speaker.upper()}: {turn.text}")
 
     log = EventLog()
     result = run_dialogue(

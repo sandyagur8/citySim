@@ -37,8 +37,9 @@ def create_app(n_agents: int = 1000, grid_size: int = 60, seed: int = 42) -> Fas
         sim = build_sim(n_agents=n_agents, grid_size=grid_size, seed=seed)
         sim_holder["sim"] = sim
         tick_task["task"] = asyncio.create_task(tick_loop(sim))
-        log.info("Sim ready: %d establishments, %d agents",
-                 len(sim.establishments), len(sim.agents))
+        log.info(
+            "Sim ready: %d establishments, %d agents", len(sim.establishments), len(sim.agents)
+        )
         try:
             yield
         finally:
@@ -63,7 +64,7 @@ def create_app(n_agents: int = 1000, grid_size: int = 60, seed: int = 42) -> Fas
     async def ws_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
         sim = sim_holder["sim"]
-        queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
         sim.subscribers.add(queue)
 
         # Send init
@@ -89,7 +90,7 @@ def create_app(n_agents: int = 1000, grid_size: int = 60, seed: int = 42) -> Fas
             await asyncio.gather(*tasks)
         except WebSocketDisconnect:
             pass
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("ws error: %s", e)
         finally:
             for t in tasks:

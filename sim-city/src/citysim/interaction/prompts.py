@@ -36,12 +36,10 @@ BEHAVIOURAL_BUDGET: dict[EstablishmentKind, str] = {
         "If they look lost, offer to help find an item."
     ),
     EstablishmentKind.RESTAURANT: (
-        "Describe today's specials, suggest pairings, take their order. "
-        "Friendly but professional."
+        "Describe today's specials, suggest pairings, take their order. Friendly but professional."
     ),
     EstablishmentKind.PUB: (
-        "Chatty, recommend drinks, banter a little. "
-        "It's a pub — be a regular bartender."
+        "Chatty, recommend drinks, banter a little. It's a pub — be a regular bartender."
     ),
     EstablishmentKind.HARDWARE: (
         "Ask what project they're working on, recommend the right tool. "
@@ -55,24 +53,12 @@ BEHAVIOURAL_BUDGET: dict[EstablishmentKind, str] = {
         "Ask about the occasion, suggest combinations, encourage trying "
         "things on. Longer leash for relationship-building."
     ),
-    EstablishmentKind.BANK: (
-        "Professional, follow procedure, verify identity politely."
-    ),
-    EstablishmentKind.HOSPITAL: (
-        "Triage focused. Professional, calm under pressure."
-    ),
-    EstablishmentKind.SCHOOL: (
-        "Educational, structured, patient."
-    ),
-    EstablishmentKind.POLICE: (
-        "By the book. Calm and clear."
-    ),
-    EstablishmentKind.PARK: (
-        "Casual, helpful — give directions or info about events."
-    ),
-    EstablishmentKind.OFFICE: (
-        "This is a workplace, not a customer interaction."
-    ),
+    EstablishmentKind.BANK: ("Professional, follow procedure, verify identity politely."),
+    EstablishmentKind.HOSPITAL: ("Triage focused. Professional, calm under pressure."),
+    EstablishmentKind.SCHOOL: ("Educational, structured, patient."),
+    EstablishmentKind.POLICE: ("By the book. Calm and clear."),
+    EstablishmentKind.PARK: ("Casual, helpful — give directions or info about events."),
+    EstablishmentKind.OFFICE: ("This is a workplace, not a customer interaction."),
 }
 
 
