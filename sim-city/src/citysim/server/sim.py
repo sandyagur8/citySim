@@ -18,7 +18,11 @@ from typing import Any
 from citysim.reporting import format_summary, summarize_day
 from citysim.store import EventLog, PersonaStore
 from citysim.world.agents import MODE_SPEED, Agent
-from citysim.world.establishments import Establishment, place_establishments
+from citysim.world.establishments import (
+    Establishment,
+    cap_establishments_per_kind,
+    place_establishments,
+)
 from citysim.world.grid import CityGrid, generate_grid
 from citysim.world.personas import Persona, load_or_generate_personas
 from citysim.world.schedule import ACTIVITY_CODES, Activity, Intention, plan_day
@@ -80,6 +84,7 @@ def build_sim(
     n_agents: int = 10000,
     grid_size: int = 150,
     seed: int = 42,
+    max_establishments_per_kind: int | None = None,
     *,
     store: PersonaStore | None = None,
     force_regenerate: bool = False,
@@ -92,14 +97,17 @@ def build_sim(
     """
     grid = generate_grid(size=grid_size, seed=seed)
     establishments = place_establishments(grid, seed=seed)
+    if max_establishments_per_kind is not None:
+        establishments = cap_establishments_per_kind(
+            establishments,
+            max_per_kind=max_establishments_per_kind,
+            seed=seed,
+        )
     if store is None:
         store = PersonaStore()
     personas = load_or_generate_personas(
-        grid,
-        establishments,
-        n=n_agents,
-        seed=seed,
-        store=store,
+        grid, establishments, n=n_agents, seed=seed, store=store,
+        signature_extra=f"max_est_per_kind={max_establishments_per_kind}",
         force_regenerate=force_regenerate,
     )
     agents = [p.to_agent() for p in personas]

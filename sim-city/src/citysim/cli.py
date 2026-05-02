@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import subprocess
+import tempfile
+import json
+from pathlib import Path
 
 import typer
 import uvicorn
@@ -14,9 +19,10 @@ app = typer.Typer(help="Sim-city — synthetic city simulator.")
 def serve(
     host: str = "127.0.0.1",
     port: int = 8000,
-    n_agents: int = 10000,
-    grid_size: int = 150,
+    n_agents: int = 100,
+    grid_size: int = 80,
     seed: int = 42,
+    max_establishments_per_kind: int = 5,
     log_level: str = "info",
     auto_dialogue: bool = True,
 ) -> None:
@@ -35,10 +41,14 @@ def serve(
     from citysim.server.app import create_app
 
     application = create_app(
+        
         n_agents=n_agents,
+       
         grid_size=grid_size,
+       
         seed=seed,
         auto_dialogue=auto_dialogue,
+        max_establishments_per_kind=max_establishments_per_kind,
     )
     uvicorn.run(application, host=host, port=port, log_level=log_level)
 
@@ -103,10 +113,78 @@ def show_persona(agent_id: str) -> None:
     typer.echo(f"  occupation={row.occupation} income={row.income_band}")
     typer.echo(f"  household={row.household_id} role={row.household_role}")
     typer.echo(f"  home=({row.home_x},{row.home_y}) work=({row.work_x},{row.work_y})")
+    typer.echo(f"  ens={row.ens_name} wallet={row.wallet_address} ens_status={row.ens_status}")
+    typer.echo(f"  axl_key={row.axl_key}")
     typer.echo(f"  prefs={row.prefs}")
     typer.echo(f"  needs={row.needs}")
     typer.echo("")
     typer.echo(f"  card: {row.card_text}")
+
+
+@app.command(name="backfill-wallets")
+def backfill_wallets(
+    account_group: int = 0,
+    dry_run: bool = False,
+) -> None:
+    """Backfill deterministic HD wallet addresses for all personas in DB."""
+    import os
+
+    from citysim.store import PersonaStore
+    from citysim.web3.wallets import derive_wallet_address
+
+    mnemonic = os.environ.get("CITYSIM_WALLET_MNEMONIC") or os.environ.get("MNEMONIC")
+    if not mnemonic:
+        typer.echo("Missing mnemonic. Set CITYSIM_WALLET_MNEMONIC or MNEMONIC.")
+        raise typer.Exit(1)
+
+    store = PersonaStore()
+    rows = store.all()
+    if not rows:
+        typer.echo("No personas found in DB.")
+        return
+
+    updated = 0
+    for row in rows:
+        try:
+            idx = int(row.agent_id[1:])
+        except ValueError:
+            continue
+        addr = derive_wallet_address(mnemonic, idx, account_group=account_group)
+        if row.wallet_address == addr:
+            continue
+        row.wallet_address = addr
+        updated += 1
+
+    if dry_run:
+        typer.echo(f"[dry-run] would update {updated} persona wallet addresses")
+        return
+
+    store.insert_many(rows)
+    typer.echo(f"Updated wallet addresses for {updated} personas")
+
+
+@app.command(name="backfill-axl-keys")
+def backfill_axl_keys(
+    dry_run: bool = False,
+) -> None:
+    """Backfill deterministic placeholder AXL keys for existing personas."""
+    import hashlib
+    from citysim.store import PersonaStore
+
+    store = PersonaStore()
+    rows = store.all()
+    updated = 0
+    for row in rows:
+        desired = hashlib.sha256(f"axl:{row.agent_id}".encode("utf-8")).hexdigest()
+        if row.axl_key == desired:
+            continue
+        row.axl_key = desired
+        updated += 1
+    if dry_run:
+        typer.echo(f"[dry-run] would update {updated} axl_key fields")
+        return
+    store.insert_many(rows)
+    typer.echo(f"Updated axl_key for {updated} personas")
 
 
 @app.command(name="run-dialogue")
@@ -140,6 +218,7 @@ def run_dialogue_cmd(
         pick_random_store,
         run_dialogue,
     )
+    from citysim.interaction.transport import AxlTransport, LocalTransport
     from citysim.server.sim import build_sim
     from citysim.store import EventLog
 
@@ -187,6 +266,8 @@ def run_dialogue_cmd(
         typer.echo(f"  {turn.speaker.upper()}: {turn.text}")
 
     log = EventLog()
+    transport_kind = os.environ.get("CITYSIM_TRANSPORT", "local").lower()
+    transport = AxlTransport.from_env() if transport_kind == "axl" else LocalTransport()
     result = run_dialogue(
         buyer,
         seller,
@@ -195,6 +276,7 @@ def run_dialogue_cmd(
         extract_outcome=not no_extract,
         log_to=log,
         on_turn=_print_turn,
+        transport=transport,
     )
 
     typer.echo("")
@@ -428,3 +510,132 @@ def llm_test(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command(name="mint-ens-subnames")
+def mint_ens_subnames(
+    limit: int = 20,
+    script_path: str = "../axl_integration/mint_ens_subnames.ts",
+    dry_run: bool = False,
+) -> None:
+    """Mint ENS subnames for pending personas and update ens_status/tx hash."""
+    from citysim.store import PersonaStore
+
+    store = PersonaStore()
+    rows = store.all()
+    pending = [r for r in rows if (r.ens_status or "pending") != "minted" and r.ens_name]
+    jobs = []
+    for r in pending[: max(0, limit)]:
+        jobs.append(
+            {
+                "agent_id": r.agent_id,
+                "ens_name": r.ens_name,
+                "text_value": r.wallet_address or r.agent_id,
+            }
+        )
+
+    if not jobs:
+        typer.echo("No pending personas with ens_name found.")
+        return
+    if dry_run:
+        typer.echo(f"[dry-run] would mint {len(jobs)} subnames")
+        return
+
+    script_abs = Path(script_path).resolve()
+    if not script_abs.exists():
+        typer.echo(f"ENS mint script not found: {script_abs}")
+        raise typer.Exit(1)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+        json.dump(jobs, tmp)
+        tmp.flush()
+        tmp_path = tmp.name
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as out:
+        out_path = out.name
+
+    proc = subprocess.run(
+        ["npx", "tsx", str(script_abs), tmp_path, out_path],
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        typer.echo("ENS mint worker failed:")
+        raise typer.Exit(1)
+
+    try:
+        with open(out_path, encoding="utf-8") as f:
+            results = json.load(f)
+    except Exception:
+        typer.echo("Could not parse ENS worker output.")
+        raise typer.Exit(1)
+
+    by_id = {r.agent_id: r for r in rows}
+    minted = 0
+    failed = 0
+    for res in results:
+        row = by_id.get(res.get("agent_id"))
+        if not row:
+            continue
+        status = res.get("status")
+        if status == "minted":
+            row.ens_status = "minted"
+            row.ens_tx_hash = res.get("tx_hash")
+            minted += 1
+        else:
+            row.ens_status = "failed"
+            failed += 1
+    store.insert_many(rows)
+    typer.echo(f"ENS mint done. minted={minted} failed={failed}")
+
+
+@app.command(name="push-axl-keys-to-ens")
+def push_axl_keys_to_ens(
+    limit: int = 20,
+    script_path: str = "../axl_integration/set_ens_text_batch.ts",
+    dry_run: bool = False,
+) -> None:
+    """Push persona axl_key values into ENS text record axl_key."""
+    from citysim.store import PersonaStore
+
+    store = PersonaStore()
+    rows = store.all()
+    targets = [
+        r
+        for r in rows
+        if r.ens_status == "minted" and r.ens_name and r.axl_key
+    ][: max(0, limit)]
+    if not targets:
+        typer.echo("No minted personas with axl_key found.")
+        return
+    if dry_run:
+        typer.echo(f"[dry-run] would push {len(targets)} ENS text records")
+        return
+
+    script_abs = Path(script_path).resolve()
+    if not script_abs.exists():
+        typer.echo(f"ENS text batch script not found: {script_abs}")
+        raise typer.Exit(1)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+        jobs = [{"agent_id": r.agent_id, "ens_name": r.ens_name, "text_value": r.axl_key} for r in targets]
+        json.dump(jobs, tmp)
+        tmp.flush()
+        tmp_path = tmp.name
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as out:
+        out_path = out.name
+
+    proc = subprocess.run(
+        ["npx", "tsx", str(script_abs), tmp_path, out_path],
+        text=True,
+        check=False,
+    )
+    typer.echo(f"Submitted {len(targets)} ENS text updates. Waiting for worker...")
+    if proc.returncode != 0:
+        typer.echo("ENS text push worker failed.")
+        raise typer.Exit(1)
+
+    with open(out_path, encoding="utf-8") as f:
+        result = json.load(f)
+    ok = sum(1 for r in result if r.get("status") == "ok")
+    failed = len(result) - ok
+    typer.echo(f"ENS text push done. ok={ok} failed={failed}")

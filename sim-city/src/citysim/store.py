@@ -78,7 +78,12 @@ CREATE TABLE IF NOT EXISTS personas (
     -- rich fields stored as JSON blobs
     needs_json      TEXT NOT NULL,
     prefs_json      TEXT NOT NULL,
-    card_text       TEXT NOT NULL
+    card_text       TEXT NOT NULL,
+    ens_name        TEXT,
+    wallet_address  TEXT,
+    axl_key         TEXT,
+    ens_status      TEXT DEFAULT 'pending',
+    ens_tx_hash     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_personas_household  ON personas(household_id);
@@ -119,6 +124,11 @@ class PersonaRow:
     needs: dict[str, float]
     prefs: dict[str, Any]
     card_text: str
+    ens_name: str | None = None
+    wallet_address: str | None = None
+    axl_key: str | None = None
+    ens_status: str = "pending"
+    ens_tx_hash: str | None = None
 
     def to_db(self) -> dict[str, Any]:
         return {
@@ -140,6 +150,11 @@ class PersonaRow:
             "needs_json": json.dumps(self.needs, separators=(",", ":")),
             "prefs_json": json.dumps(self.prefs, separators=(",", ":")),
             "card_text": self.card_text,
+            "ens_name": self.ens_name,
+            "wallet_address": self.wallet_address,
+            "axl_key": self.axl_key,
+            "ens_status": self.ens_status,
+            "ens_tx_hash": self.ens_tx_hash,
         }
 
     @classmethod
@@ -163,6 +178,11 @@ class PersonaRow:
             needs=json.loads(row["needs_json"]),
             prefs=json.loads(row["prefs_json"]),
             card_text=row["card_text"],
+            ens_name=row["ens_name"],
+            wallet_address=row["wallet_address"],
+            axl_key=row["axl_key"],
+            ens_status=row["ens_status"] or "pending",
+            ens_tx_hash=row["ens_tx_hash"],
         )
 
 
@@ -175,6 +195,25 @@ class PersonaStore:
         self._lock = threading.Lock()
         with self._connect() as c:
             c.executescript(PERSONA_SCHEMA)
+            self._ensure_schema_migrations(c)
+
+    def _ensure_schema_migrations(self, c: sqlite3.Connection) -> None:
+        # Backward-compatible local migrations for existing prototype DBs.
+        cols = {
+            r["name"]
+            for r in c.execute("PRAGMA table_info(personas)").fetchall()
+        }
+        if "ens_name" not in cols:
+            c.execute("ALTER TABLE personas ADD COLUMN ens_name TEXT")
+        if "wallet_address" not in cols:
+            c.execute("ALTER TABLE personas ADD COLUMN wallet_address TEXT")
+        if "ens_status" not in cols:
+            c.execute("ALTER TABLE personas ADD COLUMN ens_status TEXT DEFAULT 'pending'")
+        if "ens_tx_hash" not in cols:
+            c.execute("ALTER TABLE personas ADD COLUMN ens_tx_hash TEXT")
+        if "axl_key" not in cols:
+            c.execute("ALTER TABLE personas ADD COLUMN axl_key TEXT")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_personas_ens_name ON personas(ens_name)")
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -210,11 +249,13 @@ class PersonaStore:
         INSERT OR REPLACE INTO personas
           (agent_id, seed, age, gender, education, income_band, occupation,
            employer_id, household_id, household_role, home_x, home_y,
-           work_x, work_y, mode, needs_json, prefs_json, card_text)
+           work_x, work_y, mode, needs_json, prefs_json, card_text,
+           ens_name, wallet_address, axl_key, ens_status, ens_tx_hash)
         VALUES
-          (:agent_id, :seed, :age, :gender, :education, :income_band, :occupation,
+           (:agent_id, :seed, :age, :gender, :education, :income_band, :occupation,
            :employer_id, :household_id, :household_role, :home_x, :home_y,
-           :work_x, :work_y, :mode, :needs_json, :prefs_json, :card_text)
+           :work_x, :work_y, :mode, :needs_json, :prefs_json, :card_text,
+           :ens_name, :wallet_address, :axl_key, :ens_status, :ens_tx_hash)
         """
         with self._lock, self._connect() as c:
             c.executemany(sql, payload)

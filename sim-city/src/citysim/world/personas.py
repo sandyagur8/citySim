@@ -28,6 +28,7 @@ can be queried by segment.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -41,6 +42,7 @@ from citysim.world.agents import (
 )
 from citysim.world.establishments import Establishment
 from citysim.world.grid import CityGrid
+from citysim.web3.wallets import derive_wallet_address
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +89,11 @@ class Persona:
     needs: dict[str, float] = field(default_factory=dict)
     prefs: dict[str, float | str] = field(default_factory=dict)
     card_text: str = ""
+    ens_name: str | None = None
+    wallet_address: str | None = None
+    axl_key: str | None = None
+    ens_status: str = "pending"
+    ens_tx_hash: str | None = None
 
     # ----- bridges ---------------------------------------------------------
 
@@ -127,6 +134,11 @@ class Persona:
             needs=self.needs,
             prefs=self.prefs,
             card_text=self.card_text,
+            ens_name=self.ens_name,
+            wallet_address=self.wallet_address,
+            axl_key=self.axl_key,
+            ens_status=self.ens_status,
+            ens_tx_hash=self.ens_tx_hash,
         )
 
     @classmethod
@@ -149,6 +161,11 @@ class Persona:
             needs=dict(row.needs),
             prefs=dict(row.prefs),
             card_text=row.card_text,
+            ens_name=row.ens_name,
+            wallet_address=row.wallet_address,
+            axl_key=row.axl_key,
+            ens_status=row.ens_status,
+            ens_tx_hash=row.ens_tx_hash,
         )
 
 
@@ -379,6 +396,29 @@ def _card_text(p: Persona) -> str:
     )
 
 
+def _load_shared_env_from_axl_integration() -> dict[str, str]:
+    # Reuse existing web3 env when sim-city runs inside monorepo root.
+    here = os.path.abspath(__file__)
+    root = os.path.abspath(os.path.join(here, "..", "..", "..", "..", ".."))
+    env_path = os.path.join(root, "axl_integration", ".env")
+    if not os.path.exists(env_path):
+        return {}
+    out: dict[str, str] = {}
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            s = line.strip()
+            if not s or s.startswith("#") or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            out[k.strip()] = v.strip().strip("'\"")
+    return out
+
+
+def _derive_axl_key(agent_id: str) -> str:
+    # Placeholder per-agent key until true AXL keygen service is wired.
+    return hashlib.sha256(f"axl:{agent_id}".encode("utf-8")).hexdigest()
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -402,6 +442,13 @@ def generate_personas(
     employers = [e for e in establishments if e.kind in _OCCUPATIONS_BY_KIND]
     if not employers:
         raise ValueError("No employers placed; check establishments")
+    shared_env = _load_shared_env_from_axl_integration()
+    ens_base_domain = os.environ.get("CITYSIM_ENS_BASE_DOMAIN", "simcity.eth").strip(".")
+    wallet_mnemonic = (
+        os.environ.get("CITYSIM_WALLET_MNEMONIC")
+        or os.environ.get("MNEMONIC")
+        or shared_env.get("MNEMONIC", "")
+    )
 
     # Households share an address. We generate household *anchors* first and
     # bucket personas into them so members co-locate.
@@ -470,6 +517,10 @@ def generate_personas(
             mode=mode,
             needs=needs,
             prefs=prefs,
+            ens_name=f"a{i:06d}.{ens_base_domain}",
+            wallet_address=derive_wallet_address(wallet_mnemonic, i) if wallet_mnemonic else None,
+            axl_key=_derive_axl_key(f"a{i:06d}"),
+            ens_status="pending",
         )
         persona.card_text = _card_text(persona)
         personas.append(persona)
@@ -484,10 +535,13 @@ def load_or_generate_personas(
     seed: int,
     store: PersonaStore,
     *,
+    signature_extra: str = "",
     force_regenerate: bool = False,
 ) -> list[Persona]:
     """Read personas from the store; if missing or stale, regenerate + persist."""
     sig = f"n={n};seed={seed};grid={grid.size}"
+    if signature_extra:
+        sig = f"{sig};{signature_extra}"
     if not force_regenerate:
         existing_sig = store.get_meta("world_signature")
         if existing_sig == sig and store.count() == n:

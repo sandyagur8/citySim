@@ -45,10 +45,11 @@ log = logging.getLogger("citysim.server")
 
 
 def create_app(
-    n_agents: int = 1000,
+    n_agents: int = 100,
     grid_size: int = 60,
     seed: int = 42,
     *,
+    max_establishments_per_kind: int | None = 5,
     auto_dialogue: bool | None = None,
 ) -> FastAPI:
     sim_holder: dict[str, SimState] = {}
@@ -64,7 +65,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
         log.info("Building sim with n_agents=%d grid_size=%d", n_agents, grid_size)
-        sim = build_sim(n_agents=n_agents, grid_size=grid_size, seed=seed)
+        sim = build_sim(
+            n_agents=n_agents,
+            grid_size=grid_size,
+            seed=seed,
+            max_establishments_per_kind=max_establishments_per_kind,
+        )
         sim_holder["sim"] = sim
         tick_task["task"] = asyncio.create_task(tick_loop(sim))
         log.info(

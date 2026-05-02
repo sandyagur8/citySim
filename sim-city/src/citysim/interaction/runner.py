@@ -18,9 +18,10 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from citysim.llm import LLMMessage, get_gateway
+from citysim.product import ProductBrief
 from citysim.store import EventLog
 from citysim.world.establishments import Establishment, EstablishmentKind
 from citysim.world.personas import Persona
@@ -31,9 +32,7 @@ from .prompts import (
     buyer_system_prompt,
     seller_system_prompt,
 )
-
-if TYPE_CHECKING:
-    from citysim.product import ProductBrief
+from .transport import LocalTransport, Transport
 
 
 # Establishments that make sense for a customer-facing buyer dialogue.
@@ -131,6 +130,7 @@ def run_dialogue(
     product: ProductBrief | None = None,
     arm: str = "random",
     targeted: bool = False,
+    transport: Transport | None = None,
 ) -> DialogueResult:
     """Run one buyer-seller dialogue. Returns the transcript + outcome.
 
@@ -154,6 +154,8 @@ def run_dialogue(
     """
     t0 = time.monotonic()
     agent_gw = get_gateway(tier="agent")
+    transport = transport or LocalTransport()
+    _ = transport
 
     is_product_dialogue = product is not None and product.category == est.kind.value
     active_product = product if is_product_dialogue else None

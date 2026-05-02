@@ -129,3 +129,30 @@ def place_establishments(grid: CityGrid, seed: int = 42) -> list[Establishment]:
                         )
                     )
     return establishments
+
+
+def cap_establishments_per_kind(
+    establishments: list[Establishment],
+    *,
+    max_per_kind: int,
+    seed: int = 42,
+) -> list[Establishment]:
+    if max_per_kind <= 0:
+        return []
+    rng = np.random.default_rng(seed + 101)
+    by_kind: dict[EstablishmentKind, list[Establishment]] = {}
+    for est in establishments:
+        by_kind.setdefault(est.kind, []).append(est)
+
+    capped: list[Establishment] = []
+    for kind in EstablishmentKind:
+        if kind is EstablishmentKind.HOME:
+            continue
+        group = by_kind.get(kind, [])
+        if len(group) <= max_per_kind:
+            capped.extend(group)
+            continue
+        idx = rng.choice(len(group), size=max_per_kind, replace=False)
+        chosen = [group[int(i)] for i in idx]
+        capped.extend(chosen)
+    return capped
