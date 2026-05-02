@@ -14,13 +14,16 @@ import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-from citysim.world.agents import MODE_SPEED, Agent, generate_agents
+from citysim.store import PersonaStore
+from citysim.world.agents import MODE_SPEED, Agent
 from citysim.world.establishments import Establishment, place_establishments
 from citysim.world.grid import CityGrid, generate_grid
+from citysim.world.personas import Persona, load_or_generate_personas
 from citysim.world.schedule import ACTIVITY_CODES, Activity, Intention, plan_day
 
-# How often (in sim minutes) to broadcast position deltas
-BROADCAST_EVERY_SIM_MIN = 5
+# How often (in sim minutes) to broadcast position deltas.
+# Lower = smoother animation at high speed multipliers (e.g. 1440× / 1-min days).
+BROADCAST_EVERY_SIM_MIN = 2
 
 # Real-second cadence of the tick loop. We advance sim_time by speed * dt
 # each iteration; smaller dt = smoother, larger dt = cheaper. 0.1s is plenty.
@@ -32,6 +35,7 @@ class SimState:
     grid: CityGrid
     establishments: list[Establishment]
     agents: list[Agent]
+    personas: list[Persona] = field(default_factory=list)
     plans: dict[str, list[Intention]] = field(default_factory=dict)
 
     # Clock (minute-of-day, float)
@@ -49,16 +53,40 @@ class SimState:
     # Bookkeeping
     last_broadcast_min: float = -10.0
 
+    # Lookups for the interaction runner / API
+    persona_by_id: dict[str, Persona] = field(default_factory=dict)
+
 
 def build_sim(
-    n_agents: int = 1000,
-    grid_size: int = 60,
+    n_agents: int = 10000,
+    grid_size: int = 150,
     seed: int = 42,
+    *,
+    store: PersonaStore | None = None,
+    force_regenerate: bool = False,
 ) -> SimState:
+    """Build the world.
+
+    Personas are loaded from the SQLite store if it already holds a matching
+    world (same n / seed / grid). Otherwise we generate fresh and persist.
+    Pass ``force_regenerate=True`` to wipe and rebuild on demand.
+    """
     grid = generate_grid(size=grid_size, seed=seed)
     establishments = place_establishments(grid, seed=seed)
-    agents = generate_agents(grid, establishments, n=n_agents, seed=seed)
-    sim = SimState(grid=grid, establishments=establishments, agents=agents)
+    if store is None:
+        store = PersonaStore()
+    personas = load_or_generate_personas(
+        grid, establishments, n=n_agents, seed=seed, store=store,
+        force_regenerate=force_regenerate,
+    )
+    agents = [p.to_agent() for p in personas]
+    sim = SimState(
+        grid=grid,
+        establishments=establishments,
+        agents=agents,
+        personas=personas,
+        persona_by_id={p.agent_id: p for p in personas},
+    )
     for a in agents:
         sim.plans[a.id] = plan_day(a, establishments, day_of_week=sim.day_of_week, seed=seed)
     return sim
