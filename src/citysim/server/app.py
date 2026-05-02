@@ -11,11 +11,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
+from citysim.interaction import dialogue_worker
 from citysim.server.sim import (
     SimState,
     apply_control,
@@ -27,9 +29,22 @@ from citysim.server.sim import (
 log = logging.getLogger("citysim.server")
 
 
-def create_app(n_agents: int = 1000, grid_size: int = 60, seed: int = 42) -> FastAPI:
+def create_app(
+    n_agents: int = 1000,
+    grid_size: int = 60,
+    seed: int = 42,
+    *,
+    auto_dialogue: bool | None = None,
+) -> FastAPI:
     sim_holder: dict[str, SimState] = {}
     tick_task: dict[str, asyncio.Task[Any]] = {}
+    dialogue_task: dict[str, asyncio.Task[Any]] = {}
+
+    # Auto-dialogue is on by default; disable with auto_dialogue=False
+    # or env var CITYSIM_AUTO_DIALOGUE=0/false.
+    if auto_dialogue is None:
+        env_val = os.environ.get("CITYSIM_AUTO_DIALOGUE", "1").strip().lower()
+        auto_dialogue = env_val not in {"0", "false", "no", "off"}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
@@ -37,8 +52,14 @@ def create_app(n_agents: int = 1000, grid_size: int = 60, seed: int = 42) -> Fas
         sim = build_sim(n_agents=n_agents, grid_size=grid_size, seed=seed)
         sim_holder["sim"] = sim
         tick_task["task"] = asyncio.create_task(tick_loop(sim))
-        log.info("Sim ready: %d establishments, %d agents",
-                 len(sim.establishments), len(sim.agents))
+        log.info(
+            "Sim ready: %d establishments, %d agents", len(sim.establishments), len(sim.agents)
+        )
+        if auto_dialogue and sim.event_log is not None:
+            dialogue_task["task"] = asyncio.create_task(dialogue_worker(sim, sim.event_log))
+            log.info("Auto-dialogue worker started")
+        else:
+            log.info("Auto-dialogue worker disabled")
         try:
             yield
         finally:
@@ -47,6 +68,12 @@ def create_app(n_agents: int = 1000, grid_size: int = 60, seed: int = 42) -> Fas
                 await tick_task["task"]
             except (asyncio.CancelledError, Exception):
                 pass
+            if "task" in dialogue_task:
+                dialogue_task["task"].cancel()
+                try:
+                    await dialogue_task["task"]
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     app = FastAPI(title="Sim-city", lifespan=lifespan)
 
@@ -63,7 +90,7 @@ def create_app(n_agents: int = 1000, grid_size: int = 60, seed: int = 42) -> Fas
     async def ws_endpoint(websocket: WebSocket) -> None:
         await websocket.accept()
         sim = sim_holder["sim"]
-        queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
         sim.subscribers.add(queue)
 
         # Send init
@@ -89,7 +116,7 @@ def create_app(n_agents: int = 1000, grid_size: int = 60, seed: int = 42) -> Fas
             await asyncio.gather(*tasks)
         except WebSocketDisconnect:
             pass
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.warning("ws error: %s", e)
         finally:
             for t in tasks:

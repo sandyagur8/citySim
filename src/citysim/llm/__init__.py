@@ -5,7 +5,7 @@ gateway. The gateway routes by *tier*:
 
 * ``agent``  → local Ollama (Llama 3.1 8B by default). All agent dialogue,
                persona-conditioned roleplay, and routine responses run here.
-* ``audit``  → OpenAI (gpt-4o-mini by default). The 1–5% sampled tier used
+* ``audit``  → OpenAI (gpt-4o-mini by default). The 1-5% sampled tier used
                for ground-truth dialogue audits and structured outcome
                extraction. Override with ``OPENAI_MODEL`` for higher tiers.
 

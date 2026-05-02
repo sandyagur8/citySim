@@ -13,8 +13,10 @@ import asyncio
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from typing import Any
 
-from citysim.store import PersonaStore
+from citysim.reporting import format_summary, summarize_day
+from citysim.store import EventLog, PersonaStore
 from citysim.world.agents import MODE_SPEED, Agent
 from citysim.world.establishments import Establishment, place_establishments
 from citysim.world.grid import CityGrid, generate_grid
@@ -22,7 +24,7 @@ from citysim.world.personas import Persona, load_or_generate_personas
 from citysim.world.schedule import ACTIVITY_CODES, Activity, Intention, plan_day
 
 # How often (in sim minutes) to broadcast position deltas.
-# Lower = smoother animation at high speed multipliers (e.g. 1440× / 1-min days).
+# Lower = smoother animation at high speed multipliers (e.g. 1440x / 1-min days).
 BROADCAST_EVERY_SIM_MIN = 2
 
 # Real-second cadence of the tick loop. We advance sim_time by speed * dt
@@ -48,13 +50,18 @@ class SimState:
     paused: bool = False
 
     # Subscribers (asyncio queues of dict messages)
-    subscribers: set[asyncio.Queue] = field(default_factory=set)
+    subscribers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
 
     # Bookkeeping
     last_broadcast_min: float = -10.0
 
     # Lookups for the interaction runner / API
     persona_by_id: dict[str, Persona] = field(default_factory=dict)
+
+    # Storage handles (set by build_sim) — used by the dialogue scheduler
+    # and the day-rollover summary hook in tick_loop.
+    persona_store: PersonaStore | None = None
+    event_log: EventLog | None = None
 
 
 def build_sim(
@@ -76,7 +83,11 @@ def build_sim(
     if store is None:
         store = PersonaStore()
     personas = load_or_generate_personas(
-        grid, establishments, n=n_agents, seed=seed, store=store,
+        grid,
+        establishments,
+        n=n_agents,
+        seed=seed,
+        store=store,
         force_regenerate=force_regenerate,
     )
     agents = [p.to_agent() for p in personas]
@@ -86,6 +97,8 @@ def build_sim(
         agents=agents,
         personas=personas,
         persona_by_id={p.agent_id: p for p in personas},
+        persona_store=store,
+        event_log=EventLog(),
     )
     for a in agents:
         sim.plans[a.id] = plan_day(a, establishments, day_of_week=sim.day_of_week, seed=seed)
@@ -147,8 +160,8 @@ def snapshot_positions(sim: SimState) -> list[list[float | int]]:
     return out
 
 
-async def broadcast(sim: SimState, message: dict) -> None:
-    dead: list[asyncio.Queue] = []
+async def broadcast(sim: SimState, message: dict[str, Any]) -> None:
+    dead: list[asyncio.Queue[dict[str, Any]]] = []
     for q in sim.subscribers:
         try:
             q.put_nowait(message)
@@ -156,6 +169,27 @@ async def broadcast(sim: SimState, message: dict) -> None:
             dead.append(q)
     for q in dead:
         sim.subscribers.discard(q)
+
+
+def _print_day_summary(sim: SimState, day: int) -> None:
+    """Aggregate the day's events from the log and print to stdout.
+
+    Best-effort — never raises into the tick loop. If the event log isn't
+    wired up (e.g. tests), or the day file is empty, we just skip.
+    """
+    if sim.event_log is None:
+        return
+    try:
+        summary = summarize_day(
+            day,
+            event_log=sim.event_log,
+            persona_store=sim.persona_store,
+        )
+        print(format_summary(summary), flush=True)
+    except Exception:  # noqa: BLE001 - best-effort, don't crash the tick loop
+        import traceback
+
+        traceback.print_exc()
 
 
 async def tick_loop(sim: SimState) -> None:
@@ -174,6 +208,7 @@ async def tick_loop(sim: SimState) -> None:
 
         # Wrap day
         if sim.sim_minute >= 1440:
+            ended_day = sim.day_of_year
             sim.sim_minute -= 1440
             sim.day_of_year += 1
             sim.day_of_week = (sim.day_of_week + 1) % 7
@@ -182,6 +217,8 @@ async def tick_loop(sim: SimState) -> None:
                 sim.plans[a.id] = plan_day(
                     a, sim.establishments, day_of_week=sim.day_of_week, seed=sim.day_of_year
                 )
+            # Print the summary for the day that just ended.
+            _print_day_summary(sim, ended_day)
 
         # Broadcast every BROADCAST_EVERY_SIM_MIN sim minutes
         if sim.sim_minute - sim.last_broadcast_min >= BROADCAST_EVERY_SIM_MIN:
@@ -198,7 +235,7 @@ async def tick_loop(sim: SimState) -> None:
             )
 
 
-def init_payload(sim: SimState) -> dict:
+def init_payload(sim: SimState) -> dict[str, Any]:
     """Initial message sent on a new WebSocket connection."""
     return {
         "type": "init",
@@ -217,7 +254,7 @@ def init_payload(sim: SimState) -> dict:
     }
 
 
-def apply_control(sim: SimState, message: dict) -> None:
+def apply_control(sim: SimState, message: dict[str, Any]) -> None:
     """Apply a client-sent control message in-place."""
     kind = message.get("type")
     if kind == "set_speed":
@@ -233,5 +270,5 @@ def apply_control(sim: SimState, message: dict) -> None:
         pass
 
 
-def iter_subscribers(sim: SimState) -> Iterable[asyncio.Queue]:
+def iter_subscribers(sim: SimState) -> Iterable[asyncio.Queue[dict[str, Any]]]:
     return list(sim.subscribers)
