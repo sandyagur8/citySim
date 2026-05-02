@@ -203,6 +203,181 @@ def run_dialogue_cmd(
     typer.echo(f"Logged to {log.dir}")
 
 
+@app.command(name="init-product")
+def init_product_cmd() -> None:
+    """Define the product to test in the city. Saves ~/.citysim/product.json.
+
+    The simulator runs as a generic city sim until a product brief is set.
+    Once set, ``citysim serve`` biases shop dialogues toward selling this
+    product, the outcome extractor pulls richer signals (intrinsic
+    motivator, winning phrase, objections), and the day summary produces
+    product-aware sections.
+
+    To reset, run ``citysim clear-product``.
+    """
+    from citysim.product import (
+        AGE_BANDS,
+        INCOME_BANDS,
+        POSITIONING_OPTIONS,
+        ProductBrief,
+        TargetFilter,
+        default_product_path,
+        load_product,
+        save_product,
+    )
+    from citysim.world.establishments import EstablishmentKind
+
+    existing = load_product()
+    if existing:
+        typer.echo(f"A product brief already exists at {default_product_path()}:")
+        typer.echo(f"  {existing.name} ({existing.category}, ${existing.price:.2f})")
+        if not typer.confirm("Overwrite?", default=False):
+            raise typer.Exit(0)
+
+    typer.echo("")
+    typer.echo("Define the product to test:")
+    typer.echo("")
+    name = typer.prompt("Product name").strip()
+
+    # Category — only the customer-facing kinds
+    shoppable = [
+        EstablishmentKind.SUPERMARKET,
+        EstablishmentKind.COFFEE_SHOP,
+        EstablishmentKind.RESTAURANT,
+        EstablishmentKind.PUB,
+        EstablishmentKind.HARDWARE,
+        EstablishmentKind.PHARMACY,
+        EstablishmentKind.CLOTHING,
+        EstablishmentKind.BANK,
+    ]
+    typer.echo("")
+    typer.echo("Where is this product sold? Pick one:")
+    for i, k in enumerate(shoppable, 1):
+        typer.echo(f"  {i}. {k.value}")
+    pick = typer.prompt("Number", type=int)
+    if pick < 1 or pick > len(shoppable):
+        typer.echo("Invalid choice.")
+        raise typer.Exit(1)
+    category = shoppable[pick - 1].value
+
+    price = typer.prompt("Price (numeric)", type=float)
+    short_description = typer.prompt("One-sentence pitch").strip()
+    typer.echo("")
+    typer.echo("Detailed description (paste a paragraph; finish with an empty line):")
+    detailed_lines: list[str] = []
+    while True:
+        line = typer.prompt("", default="", show_default=False)
+        if not line.strip():
+            break
+        detailed_lines.append(line)
+    detailed_description = "\n".join(detailed_lines).strip()
+
+    typer.echo("")
+    target_audience = typer.prompt(
+        "Target audience (free text, e.g. 'urban professionals 25-40 who care about sustainability')"
+    ).strip()
+
+    typer.echo("")
+    typer.echo("Structured target filter (used for A/B sampling):")
+    typer.echo("Age bands: " + ", ".join(b for b, _, _ in AGE_BANDS))
+    age_raw = typer.prompt(
+        "Pick one or more (comma-separated), or blank for all", default="", show_default=False
+    )
+    age_bands = [s.strip() for s in age_raw.split(",") if s.strip()]
+    valid_age = {b for b, _, _ in AGE_BANDS}
+    age_bands = [a for a in age_bands if a in valid_age]
+
+    typer.echo("Income bands: " + ", ".join(INCOME_BANDS))
+    inc_raw = typer.prompt(
+        "Pick one or more (comma-separated), or blank for all", default="", show_default=False
+    )
+    income_bands = [s.strip() for s in inc_raw.split(",") if s.strip()]
+    income_bands = [i for i in income_bands if i in INCOME_BANDS]
+
+    occ_regex = (
+        typer.prompt(
+            "Occupation regex (case-insensitive, blank to skip)", default="", show_default=False
+        ).strip()
+        or None
+    )
+
+    typer.echo("")
+    feats_raw = typer.prompt(
+        "Key features (comma-separated, blank to skip)", default="", show_default=False
+    )
+    key_features = [s.strip() for s in feats_raw.split(",") if s.strip()]
+
+    typer.echo("")
+    typer.echo("Positioning: " + ", ".join(POSITIONING_OPTIONS))
+    positioning = typer.prompt("Pick one", default="mainstream").strip()
+    if positioning not in POSITIONING_OPTIONS:
+        positioning = "mainstream"
+
+    brief = ProductBrief(
+        name=name,
+        category=category,
+        price=float(price),
+        short_description=short_description,
+        detailed_description=detailed_description,
+        target_audience=target_audience,
+        target=TargetFilter(
+            age_bands=age_bands,
+            income_bands=income_bands,
+            occupation_regex=occ_regex,
+        ),
+        key_features=key_features,
+        positioning=positioning,
+    )
+    path = save_product(brief)
+    typer.echo("")
+    typer.echo(f"Saved product brief to {path}")
+    typer.echo(f"  {brief.name} — sold at {brief.category}, ${brief.price:.2f}")
+    typer.echo(
+        f"  Target: age={brief.target.age_bands or 'any'}, "
+        f"income={brief.target.income_bands or 'any'}"
+    )
+    typer.echo("")
+    typer.echo("Next: `citysim serve` — the worker will start running product dialogues.")
+
+
+@app.command(name="show-product")
+def show_product_cmd() -> None:
+    """Print the currently saved product brief."""
+    from citysim.product import default_product_path, load_product
+
+    brief = load_product()
+    if not brief:
+        typer.echo(f"No product brief at {default_product_path()}.")
+        typer.echo("Run `citysim init-product` to create one.")
+        raise typer.Exit(1)
+    typer.echo(f"--- {brief.name} ---")
+    typer.echo(f"  category    : {brief.category}")
+    typer.echo(f"  price       : {brief.price:.2f} {brief.currency}")
+    typer.echo(f"  positioning : {brief.positioning}")
+    typer.echo(f"  pitch       : {brief.short_description}")
+    if brief.key_features:
+        typer.echo(f"  features    : {', '.join(brief.key_features)}")
+    typer.echo(f"  target_audience : {brief.target_audience}")
+    typer.echo(f"  target.ages     : {brief.target.age_bands or 'any'}")
+    typer.echo(f"  target.income   : {brief.target.income_bands or 'any'}")
+    typer.echo(f"  target.regex    : {brief.target.occupation_regex or 'none'}")
+    if brief.detailed_description:
+        typer.echo("")
+        typer.echo("Detailed description:")
+        typer.echo(brief.detailed_description)
+
+
+@app.command(name="clear-product")
+def clear_product_cmd() -> None:
+    """Remove the saved product brief — simulator returns to generic mode."""
+    from citysim.product import clear_product, default_product_path
+
+    if clear_product():
+        typer.echo(f"Removed {default_product_path()}")
+    else:
+        typer.echo("No product brief to clear.")
+
+
 @app.command()
 def summary(day: int) -> None:
     """Print the activity summary for one simulated day.
