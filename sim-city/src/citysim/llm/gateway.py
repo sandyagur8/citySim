@@ -11,7 +11,8 @@ through provider-specific env vars:
 
   ollama-openai:
     OLLAMA_BASE_URL           (default: http://localhost:11434/v1)
-    OLLAMA_MODEL              (default: llama3.1:8b)
+    CITYSIM_OLLAMA_MODEL      (default: tinyllama)
+    OLLAMA_MODEL              (legacy fallback)
 
 We intentionally keep the surface small: list of role/content messages in,
 text out, plus an optional structured-JSON helper. Persona generation and the
@@ -79,7 +80,12 @@ class LLMGateway:
             # Ollama exposes an OpenAI-compatible endpoint at /v1/chat/completions.
             # No API key needed for a local Ollama install.
             self.api_key = api_key or os.environ.get("OPENAI_API_KEY") or "ollama"
-            self.model = model or os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
+            self.model = (
+                model
+                or os.environ.get("CITYSIM_OLLAMA_MODEL")
+                or os.environ.get("OLLAMA_MODEL")
+                or "tinyllama"
+            )
             self.base_url = (
                 base_url or os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1"
             ).rstrip("/")

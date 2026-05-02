@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
+    "nodeA": "sh -c 'cd ../axl && ./node -config ../axl_integration/nodeA-config.json'",
+    "nodeB": "sh -c 'cd ../axl && ./node -config ../axl_integration/nodeB-config.json'",
+    "nodes:run": "python3 run_nodes.py",
     "phase4:run": "tsx phase4_orchestrator.ts phase4_config.json",
     "phase4:example": "tsx phase4_orchestrator.ts phase4_config.example.json",
     "test": "echo \"Error: no test specified\" && exit 1",
