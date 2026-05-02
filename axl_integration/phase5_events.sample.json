@@ -1,0 +1,24 @@
+[
+  {
+    "interaction_id": "int_0001",
+    "tick_minute": 60,
+    "buyer_id": "buyer_001",
+    "seller_id": "seller_001",
+    "biz_id": "biz_store_42",
+    "scene_prompt": "Buyer enters soda aisle and compares zero-sugar options.",
+    "buyer_message": "Do you have NewCola Zero in stock?",
+    "expect_reply": true,
+    "seller_reply_template": "Yes, NewCola Zero available. Intro offer 2 for $6.98."
+  },
+  {
+    "interaction_id": "int_0002",
+    "tick_minute": 120,
+    "buyer_id": "buyer_001",
+    "seller_id": "seller_001",
+    "biz_id": "biz_store_42",
+    "scene_prompt": "Buyer asks follow-up about calories and taste.",
+    "buyer_message": "How does it compare with Coca-Cola Zero on calories?",
+    "expect_reply": true,
+    "seller_reply_template": "Both low calorie. NewCola Zero has citrus profile."
+  }
+]

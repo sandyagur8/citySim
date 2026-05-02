@@ -1,0 +1,21 @@
+{
+  "agents": [
+    {
+      "id": "buyer_001",
+      "ens": "citysim-agent-1-7890.eth",
+      "nodeApiPort": 9002
+    },
+    {
+      "id": "seller_001",
+      "ens": "citysim-agent-2-7890.eth",
+      "nodeApiPort": 9012
+    }
+  ],
+  "events_file": "phase5_events.sample.json",
+  "outcomes_file": "phase5_outcomes.jsonl",
+  "start_tick": 0,
+  "end_tick": 180,
+  "tick_interval_ms": 20,
+  "poll_retries": 12,
+  "poll_interval_ms": 1000
+}

@@ -1,0 +1,25 @@
+{
+  "agents": [
+    {
+      "id": "agentA",
+      "ens": "citysim-agent-1-7890.eth",
+      "nodeApiPort": 9002
+    },
+    {
+      "id": "agentB",
+      "ens": "citysim-agent-2-7890.eth",
+      "nodeApiPort": 9012
+    }
+  ],
+  "interactions": [
+    {
+      "from": "agentA",
+      "to": "agentB",
+      "message": "Hello from Agent A! Are you selling NewCola Zero?",
+      "expectReply": true,
+      "replyMessage": "Yes, I am! Would you like to buy some?"
+    }
+  ],
+  "pollRetries": 12,
+  "pollIntervalMs": 1000
+}
