@@ -10,7 +10,9 @@ import type {
   WorldPayload,
 } from '../lib/types';
 
-const BROADCAST_EVERY_SIM_MIN = 5;
+// Must match BROADCAST_EVERY_SIM_MIN in src/citysim/server/sim.py.
+// Lower = smoother animation at high speed multipliers (e.g. 1440×).
+const BROADCAST_EVERY_SIM_MIN = 2;
 
 export type SmoothedPositions = {
   // Float32Array length = nAgents * 2, layout [x0, y0, x1, y1, ...]

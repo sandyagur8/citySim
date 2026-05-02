@@ -1,42 +1,65 @@
-// The deck.gl city canvas. Three layers, drawn from bottom up:
-//   1. Zoning grid (base) — one polygon per cell, coloured by zoning class
-//   2. Establishments — small fixed dots
-//   3. Agents — animated dots coloured by current activity
+// Isometric city view. Switched from a flat top-down OrthographicView to
+// deck.gl OrbitView so we can render extruded buildings, trees, stick-figure
+// people, and cars driving on the streets — a stylised SimCity-3000 take.
 //
-// We use OrthographicView because this is a synthetic city, not a real map.
-// The view is centred on the grid at startup; the user can pan and zoom.
+// Rendering layers, back to front:
+//   1. ground tiles (PolygonLayer, flat) — colored by zoning with per-cell jitter
+//   2. road strips (PolygonLayer, flat) — dark major-grid avenues
+//   3. tree trunks + canopies (ColumnLayer pair) — short brown columns + green caps
+//   4. building extrusions (PolygonLayer, extruded) — establishments + procedural fill
+//   5. cars (ColumnLayer, square cross-section) — visible only when an agent
+//      with mode=car is currently commuting
+//   6. stick-figure body (ColumnLayer, square cross-section) — clothing color
+//   7. stick-figure head (ScatterplotLayer at body-top elevation) — skin tone
+//   8. low-zoom dot (ScatterplotLayer with radiusMinPixels) — keeps people
+//      visible when zoomed all the way out
 
-import DeckGL from '@deck.gl/react';
-import { OrthographicView, type PickingInfo } from '@deck.gl/core';
-import { PolygonLayer, ScatterplotLayer } from '@deck.gl/layers';
 import { useMemo } from 'react';
+import DeckGL from '@deck.gl/react';
+import {
+  OrbitView,
+  LightingEffect,
+  AmbientLight,
+  DirectionalLight,
+} from '@deck.gl/core';
+import { PolygonLayer, ScatterplotLayer, ColumnLayer } from '@deck.gl/layers';
+
+import type { AgentDict, EstablishmentDict, GridDict } from '../lib/types';
+import { ACTIVITY } from '../lib/types';
+import type { SmoothedPositions } from '../hooks/useSimStream';
 import {
   ACTIVITY_COLORS,
-  ESTABLISHMENT_GLYPH,
-  ZONING_COLORS,
-  type RGBA,
+  DARK_PERSON_PALETTE,
+  NEON_PERSON_PALETTE,
+  DARK_CAR_PALETTE,
+  NEON_CAR_PALETTE,
+  mix,
+  pickByIndex,
+  type RGB,
 } from '../lib/colors';
-import type {
-  AgentDict,
-  EstablishmentDict,
-  GridDict,
-  SmoothedPositions as SmoothedPositionsType,
-} from '../lib/types';
+import {
+  buildBuildings,
+  buildGround,
+  buildRoads,
+  buildTrees,
+  type Building,
+} from '../lib/cityGeometry';
 
 type Props = {
   grid: GridDict;
   establishments: EstablishmentDict[];
   agents: AgentDict[];
-  smoothed: SmoothedPositionsType | null;
+  smoothed: SmoothedPositions | null;
   sunAltitude: number;
-  onPickAgent?: (a: AgentDict | null) => void;
-  onPickEstablishment?: (e: EstablishmentDict | null) => void;
+  onPickAgent: (a: AgentDict | null) => void;
+  onPickEstablishment: (e: EstablishmentDict | null) => void;
 };
 
-type ZoningCell = {
-  polygon: [number, number][];
-  color: RGBA;
-};
+// Center stationary agents on their cell so they read as "inside the building".
+// Commuting agents stay on cell-corner gridlines so they walk on the road grid.
+function isCommuting(act: number): boolean {
+  return act === ACTIVITY.COMMUTE;
+}
 
 export function CityView({
   grid,
@@ -47,169 +70,296 @@ export function CityView({
   onPickAgent,
   onPickEstablishment,
 }: Props) {
-  // Build the zoning polygons once (memoised by grid identity)
-  const zoningCells = useMemo<ZoningCell[]>(() => {
-    const cells: ZoningCell[] = [];
-    for (let y = 0; y < grid.size; y++) {
-      for (let x = 0; x < grid.size; x++) {
-        const z = grid.zoning[y][x];
-        const color = ZONING_COLORS[z] ?? ([200, 200, 200, 255] as RGBA);
-        cells.push({
-          polygon: [
-            [x, y],
-            [x + 1, y],
-            [x + 1, y + 1],
-            [x, y + 1],
-          ],
-          color,
-        });
-      }
+  // -------------------------------------------------------------------------
+  // Static geometry — built once per world
+  // -------------------------------------------------------------------------
+  const ground = useMemo(() => buildGround(grid), [grid]);
+  const buildings = useMemo(
+    () => buildBuildings(grid, establishments, agents),
+    [grid, establishments, agents],
+  );
+  const roads = useMemo(() => buildRoads(grid), [grid]);
+  const trees = useMemo(() => buildTrees(grid), [grid]);
+
+  // Cache per-agent palette slot picks so we don't recompute every frame.
+  // Each agent has a "dark" identity and a "neon" identity in matching slots;
+  // we blend between them based on sun altitude so each agent keeps their
+  // hue identity across the day/night cycle.
+  const agentVisuals = useMemo(() => {
+    const personDark: RGB[] = [];
+    const personNeon: RGB[] = [];
+    const carDark: RGB[] = [];
+    const carNeon: RGB[] = [];
+    for (let i = 0; i < agents.length; i++) {
+      // Use the same hash salt for the dark/neon pair so the slot index lines up.
+      personDark.push(pickByIndex(DARK_PERSON_PALETTE, i, 1));
+      personNeon.push(pickByIndex(NEON_PERSON_PALETTE, i, 1));
+      carDark.push(pickByIndex(DARK_CAR_PALETTE, i, 3));
+      carNeon.push(pickByIndex(NEON_CAR_PALETTE, i, 3));
     }
-    return cells;
-  }, [grid]);
+    return { personDark, personNeon, carDark, carNeon };
+  }, [agents]);
 
-  // Tint the zoning by sun altitude — cooler/darker at night, warmer at sunrise/sunset,
-  // bright at midday. We apply a simple multiplicative tint here in the data so deck.gl
-  // doesn't have to do per-fragment math.
-  const tintedZoning = useMemo<ZoningCell[]>(() => {
-    const tint = lightingTint(sunAltitude);
-    return zoningCells.map((c) => ({
-      polygon: c.polygon,
-      color: applyTint(c.color, tint),
-    }));
-  }, [zoningCells, sunAltitude]);
+  // Blend factor: sunAltitude 1 = full daylight (use dark colors so they
+  // stand out against the bright city), sunAltitude 0 = full night (neon).
+  // Clamp so deep-night/high-noon both saturate.
+  const dayMix = Math.max(0, Math.min(1, sunAltitude));
 
-  // Establishment data
-  const establishmentData = useMemo(() => {
-    return establishments.map((e) => {
-      const glyph = ESTABLISHMENT_GLYPH[e.kind] ?? { glyph: '?', color: [120, 120, 120, 200] as RGBA };
-      // Slight jitter so dots don't perfectly overlap when many share a cell
-      const jx = ((hashStr(e.id) % 7) - 3) * 0.06;
-      const jy = ((hashStr(e.id + 'y') % 7) - 3) * 0.06;
-      return {
-        position: [e.cell[0] + 0.5 + jx, e.cell[1] + 0.5 + jy] as [number, number],
-        color: glyph.color,
-        kind: e.kind,
-        ref: e,
-      };
+  const personColorAt = (i: number): [number, number, number, number] => {
+    const c = mix(agentVisuals.personNeon[i], agentVisuals.personDark[i], dayMix);
+    return [c[0], c[1], c[2], 255];
+  };
+  const carColorAt = (i: number): [number, number, number, number] => {
+    const c = mix(agentVisuals.carNeon[i], agentVisuals.carDark[i], dayMix);
+    return [c[0], c[1], c[2], 255];
+  };
+
+  // -------------------------------------------------------------------------
+  // Camera — auto-fit zoom so the whole city is visible at any grid size
+  // -------------------------------------------------------------------------
+  const initialViewState = useMemo(() => {
+    const zoom = Math.max(1.5, Math.min(4.5, 9 - Math.log2(grid.size)));
+    return {
+      target: [grid.size / 2, grid.size / 2, 0] as [number, number, number],
+      rotationX: 55,
+      rotationOrbit: 30,
+      zoom,
+      minZoom: 0.5,
+      maxZoom: 8,
+    };
+  }, [grid.size]);
+
+  // -------------------------------------------------------------------------
+  // Sun-driven lighting
+  // -------------------------------------------------------------------------
+  const lightingEffect = useMemo(() => {
+    const sunAlt = Math.max(0, sunAltitude);
+    const ambient = new AmbientLight({
+      color: [255, 250, 240],
+      intensity: 0.35 + 0.55 * sunAlt,
     });
-  }, [establishments]);
+    const angle = sunAlt * (Math.PI / 2);
+    const dir: [number, number, number] = [
+      Math.cos(angle) * 0.6,
+      Math.cos(angle) * 0.4,
+      -Math.sin(angle) - 0.2,
+    ];
+    const warmth = 1 - sunAlt;
+    const sunColor: [number, number, number] = [
+      255,
+      Math.round(255 - 60 * warmth),
+      Math.round(255 - 120 * warmth),
+    ];
+    const sun = new DirectionalLight({
+      color: sunColor,
+      intensity: 0.6 + 0.9 * sunAlt,
+      direction: dir,
+    });
+    return new LightingEffect({ ambient, sun });
+  }, [sunAltitude]);
 
-  // Agent data — derived from smoothed positions
-  const agentData = useMemo(() => {
-    if (!smoothed) return null;
-    const n = smoothed.positions.length / 2;
-    const out = new Array(n);
-    for (let i = 0; i < n; i++) {
-      out[i] = {
-        position: [
-          smoothed.positions[i * 2] + 0.5,
-          smoothed.positions[i * 2 + 1] + 0.5,
-        ] as [number, number],
-        activity: smoothed.activities[i],
-        ref: agents[i],
-      };
-    }
-    return out;
-  }, [smoothed, agents]);
-
-  const layers = [
-    new PolygonLayer<ZoningCell>({
-      id: 'zoning',
-      data: tintedZoning,
-      getPolygon: (d) => d.polygon,
-      getFillColor: (d) => d.color,
-      stroked: false,
+  // -------------------------------------------------------------------------
+  // Layers
+  // -------------------------------------------------------------------------
+  const layers: unknown[] = [
+    new PolygonLayer({
+      id: 'ground',
+      data: ground,
       pickable: false,
-      updateTriggers: { getFillColor: sunAltitude },
+      stroked: false,
+      filled: true,
+      extruded: false,
+      getPolygon: (c) => [
+        [c.x, c.y],
+        [c.x + 1, c.y],
+        [c.x + 1, c.y + 1],
+        [c.x, c.y + 1],
+      ],
+      getFillColor: (c) => [c.color[0], c.color[1], c.color[2], 255],
     }),
-    new ScatterplotLayer({
-      id: 'establishments',
-      data: establishmentData,
-      getPosition: (d: { position: [number, number] }) => d.position,
-      getFillColor: (d: { color: RGBA }) => d.color,
-      getRadius: 0.18,
+
+    new PolygonLayer({
+      id: 'roads',
+      data: roads,
+      pickable: false,
+      stroked: false,
+      filled: true,
+      extruded: false,
+      getPolygon: (r) => r.poly,
+      getFillColor: [38, 38, 42, 255],
+      getElevation: 0.02,
+    }),
+
+    new ColumnLayer({
+      id: 'tree-trunks',
+      data: trees,
+      diskResolution: 6,
+      radius: 0.06,
+      extruded: true,
+      pickable: false,
+      getPosition: (t) => [t.x, t.y, 0],
+      getElevation: (t) => t.height * 0.5,
+      getFillColor: (t) => [t.trunkColor[0], t.trunkColor[1], t.trunkColor[2], 255],
+      material: { ambient: 0.5, diffuse: 0.6, shininess: 8, specularColor: [40, 30, 20] },
+    }),
+    new ColumnLayer({
+      id: 'tree-canopies',
+      data: trees,
+      diskResolution: 8,
+      radius: 0.22,
+      extruded: true,
+      pickable: false,
+      getPosition: (t) => [t.x, t.y, t.height * 0.5],
+      getElevation: (t) => t.height * 0.55,
+      getFillColor: (t) => [t.canopyColor[0], t.canopyColor[1], t.canopyColor[2], 255],
+      material: { ambient: 0.5, diffuse: 0.7, shininess: 8, specularColor: [40, 60, 40] },
+    }),
+
+    new PolygonLayer<Building>({
+      id: 'buildings',
+      data: buildings,
       pickable: true,
-      onClick: (info: PickingInfo) => {
-        const obj = info.object as { ref: EstablishmentDict } | null;
-        onPickEstablishment?.(obj?.ref ?? null);
+      stroked: true,
+      filled: true,
+      extruded: true,
+      // Glass-box look: low-alpha fill so people inside / behind show through,
+      // plus a darker wireframe so each building still reads as its own box.
+      wireframe: true,
+      getPolygon: (b) => b.footprint,
+      getFillColor: (b) => [b.color[0], b.color[1], b.color[2], 80],
+      getLineColor: (b) => [
+        Math.max(0, b.color[0] - 60),
+        Math.max(0, b.color[1] - 60),
+        Math.max(0, b.color[2] - 60),
+        200,
+      ],
+      getElevation: (b) => b.height,
+      material: { ambient: 0.4, diffuse: 0.7, shininess: 32, specularColor: [120, 120, 120] },
+      onClick: (info) => {
+        const b = info.object as Building | undefined;
+        onPickEstablishment(b?.est ?? null);
       },
     }),
-    agentData
-      ? new ScatterplotLayer({
-          id: 'agents',
-          data: agentData,
-          getPosition: (d: { position: [number, number] }) => d.position,
-          getFillColor: (d: { activity: number }) =>
-            ACTIVITY_COLORS[d.activity] ?? [200, 200, 200, 255],
-          getRadius: 0.13,
-          radiusMinPixels: 1.5,
-          radiusMaxPixels: 6,
-          pickable: true,
-          onClick: (info: PickingInfo) => {
-            const obj = info.object as { ref: AgentDict } | null;
-            onPickAgent?.(obj?.ref ?? null);
-          },
-          updateTriggers: { getFillColor: smoothed?.simMinute },
-        })
-      : null,
-  ].filter(Boolean);
+  ];
 
-  // Default initial view: centred on the grid, zoomed to fit
-  const initialViewState = {
-    target: [grid.size / 2, grid.size / 2, 0],
-    zoom: Math.log2(800 / grid.size),  // empirically tuned for fit
-    minZoom: 0,
-    maxZoom: 8,
-  };
+  // -------------------------------------------------------------------------
+  // Per-agent dynamic layers (cars, bodies, heads, low-zoom dots)
+  // -------------------------------------------------------------------------
+  if (smoothed) {
+    const positionFor = (i: number, z: number): [number, number, number] => {
+      const act = smoothed.activities[i] ?? 0;
+      const offset = isCommuting(act) ? 0 : 0.5; // center on building when stationary
+      return [smoothed.positions[i * 2] + offset, smoothed.positions[i * 2 + 1] + offset, z];
+    };
+
+    layers.push(
+      // Cars: square columns, visible only during car-mode commute. material:false
+      // bypasses lighting so neon stays vibrant at night (and dark stays muted by day).
+      new ColumnLayer<AgentDict>({
+        id: 'cars',
+        data: agents,
+        diskResolution: 4, // square cross-section
+        radius: 0.32, // larger car footprint — visible at city zoom
+        angle: 45,
+        extruded: true,
+        pickable: false,
+        getPosition: (_a, info) => positionFor(info.index, 0),
+        getElevation: (a, info) => {
+          if (a.mode !== 'car') return 0;
+          const act = smoothed.activities[info.index] ?? 0;
+          return isCommuting(act) ? 0.4 : 0; // taller car body
+        },
+        getFillColor: (a, info) => {
+          if (a.mode !== 'car') return [0, 0, 0, 0];
+          const act = smoothed.activities[info.index] ?? 0;
+          if (!isCommuting(act)) return [0, 0, 0, 0];
+          return carColorAt(info.index);
+        },
+        updateTriggers: {
+          getPosition: smoothed,
+          getElevation: smoothed,
+          getFillColor: [smoothed, dayMix],
+        },
+        material: false,
+      }),
+
+      // Stick-figure body — dark by day / neon by night. material:false keeps
+      // colors at full saturation so neon reads as glowing at night.
+      new ColumnLayer<AgentDict>({
+        id: 'people-bodies',
+        data: agents,
+        diskResolution: 4,
+        radius: 0.16, // bigger torso so figures read clearly at city zoom
+        angle: 0,
+        extruded: true,
+        pickable: true,
+        getPosition: (_a, info) => positionFor(info.index, 0),
+        getElevation: 0.95, // taller bodies — closer to a story tall
+        getFillColor: (_a, info) => personColorAt(info.index),
+        updateTriggers: {
+          getPosition: smoothed,
+          getFillColor: dayMix,
+        },
+        material: false,
+        onClick: (info) => onPickAgent((info.object as AgentDict | undefined) ?? null),
+      }),
+
+      // Stick-figure head — same dark/neon treatment as body so each agent
+      // reads as a single hue identity from head to toe.
+      new ScatterplotLayer<AgentDict>({
+        id: 'people-heads',
+        data: agents,
+        pickable: false,
+        stroked: false,
+        filled: true,
+        radiusUnits: 'common',
+        radiusMinPixels: 3,
+        radiusMaxPixels: 10,
+        getPosition: (_a, info) => positionFor(info.index, 1.05),
+        getRadius: 0.22,
+        getFillColor: (_a, info) => personColorAt(info.index),
+        updateTriggers: {
+          getPosition: smoothed,
+          getFillColor: dayMix,
+        },
+      }),
+
+      // Low-zoom dot — keeps people visible when zoomed all the way out
+      new ScatterplotLayer<AgentDict>({
+        id: 'people-dots',
+        data: agents,
+        pickable: false,
+        stroked: false,
+        filled: true,
+        radiusUnits: 'common',
+        radiusMinPixels: 3,
+        radiusMaxPixels: 5,
+        getPosition: (_a, info) => positionFor(info.index, 1.1),
+        getRadius: 0.12,
+        getFillColor: (_a, info) => {
+          const code = smoothed.activities[info.index] ?? 0;
+          const c = ACTIVITY_COLORS[code] ?? [200, 200, 200];
+          return [c[0], c[1], c[2], 255];
+        },
+        updateTriggers: {
+          getPosition: smoothed,
+          getFillColor: smoothed,
+        },
+      }),
+    );
+  }
 
   return (
     <DeckGL
-      views={new OrthographicView({ id: 'ortho', flipY: true })}
+      views={new OrbitView({ id: 'city', orbitAxis: 'Z' })}
       initialViewState={initialViewState}
-      controller={{ scrollZoom: { speed: 0.01, smooth: true } }}
-      layers={layers}
-      style={{ position: 'absolute', inset: 0 }}
+      controller={true}
+      layers={layers as never}
+      effects={[lightingEffect]}
+      getCursor={({ isDragging, isHovering }) =>
+        isDragging ? 'grabbing' : isHovering ? 'pointer' : 'grab'
+      }
+      style={{ width: '100%', height: '100%' }}
     />
   );
-}
-
-// Lightweight string hash for jitter
-function hashStr(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) {
-    h = (h * 31 + s.charCodeAt(i)) | 0;
-  }
-  return Math.abs(h);
-}
-
-// Lighting tint as a multiplicative RGB factor [0..1]^3 + brightness scalar.
-// sunAlt 0 = night (cool blue, dim), 1 = noon (full bright). Sunrise/sunset
-// is in between with warm bias.
-function lightingTint(sunAlt: number): { r: number; g: number; b: number; brightness: number } {
-  if (sunAlt <= 0) {
-    // night
-    return { r: 0.55, g: 0.60, b: 0.85, brightness: 0.42 };
-  }
-  if (sunAlt < 0.18) {
-    // sunrise/sunset
-    const t = sunAlt / 0.18;
-    return {
-      r: 0.80 + 0.20 * t,
-      g: 0.55 + 0.45 * t,
-      b: 0.45 + 0.55 * t,
-      brightness: 0.55 + 0.45 * t,
-    };
-  }
-  // day
-  return { r: 1, g: 1, b: 1, brightness: 1 };
-}
-
-function applyTint(color: RGBA, tint: { r: number; g: number; b: number; brightness: number }): RGBA {
-  return [
-    Math.max(0, Math.min(255, color[0] * tint.r * tint.brightness)),
-    Math.max(0, Math.min(255, color[1] * tint.g * tint.brightness)),
-    Math.max(0, Math.min(255, color[2] * tint.b * tint.brightness)),
-    color[3],
-  ];
 }

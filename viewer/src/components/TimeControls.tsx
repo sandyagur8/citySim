@@ -1,5 +1,8 @@
 // Top-bar control strip. Play/pause, speed selector, current sim time, scrubber,
 // connection state. Sends control messages to the backend.
+//
+// Speed presets go up to 1440× — at that rate one simulated day takes
+// 60 real seconds, which is what we want for fast iteration.
 
 import { useEffect, useState } from 'react';
 import type { ClockPayload, ControlMessage } from '../lib/types';
@@ -12,10 +15,18 @@ type Props = {
 
 const DOW = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 
+const SPEEDS: { value: number; label: string }[] = [
+  { value: 1, label: '1×' },
+  { value: 60, label: '60×' },
+  { value: 240, label: '240×' },
+  { value: 720, label: '720×' },
+  { value: 1440, label: '1m/day' },
+];
+
 export function TimeControls({ clock, connected, send }: Props) {
   const [scrub, setScrub] = useState<number | null>(null);
   // While dragging the scrubber we hold the slider value locally so the UI
-  // doesn't fight the live stream
+  // doesn't fight the live stream.
   useEffect(() => {
     if (scrub === null) return;
     const id = setTimeout(() => setScrub(null), 1500);
@@ -45,17 +56,17 @@ export function TimeControls({ clock, connected, send }: Props) {
       </button>
 
       <div className="flex items-center gap-1 text-sm">
-        {[1, 4, 16, 60, 240].map((s) => (
+        {SPEEDS.map(({ value, label }) => (
           <button
-            key={s}
+            key={value}
             className={`px-2 py-0.5 rounded ${
-              Math.round(clock.speed_multiplier) === s
+              Math.round(clock.speed_multiplier) === value
                 ? 'bg-amber-500 text-neutral-900 font-semibold'
                 : 'bg-neutral-800 hover:bg-neutral-700'
             }`}
-            onClick={() => send({ type: 'set_speed', value: s })}
+            onClick={() => send({ type: 'set_speed', value })}
           >
-            {s}×
+            {label}
           </button>
         ))}
       </div>
