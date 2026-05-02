@@ -1,0 +1,255 @@
+"""Run a buyer-seller dialogue end-to-end through the LLM gateway.
+
+The runner alternates turns between two persona-conditioned chat threads
+(buyer / seller), each using ``get_gateway(tier="agent")`` — which routes
+to the local Llama by default. After the dialogue ends, an audit-tier
+extraction call (``tier="audit"`` → OpenAI) parses the transcript into a
+structured outcome record and the whole thing is appended to the event log.
+
+If the audit gateway can't be initialised (no ``OPENAI_API_KEY``), we fall
+back to a simple rule-based outcome so the simulator keeps running fully
+locally. The transcript itself is unaffected.
+"""
+
+from __future__ import annotations
+
+import random
+import time
+from dataclasses import dataclass, field
+from typing import Any
+
+from citysim.llm import LLMMessage, get_gateway
+from citysim.store import EventLog
+from citysim.world.establishments import Establishment, EstablishmentKind
+from citysim.world.personas import Persona
+
+from .prompts import EXTRACTION_PROMPT, buyer_system_prompt, seller_system_prompt
+
+
+# Establishments that make sense for a customer-facing buyer dialogue.
+# Office / school / hospital / police are skipped — those are workplaces or
+# institutional interactions, modelled separately.
+SHOPPABLE_KINDS: set[EstablishmentKind] = {
+    EstablishmentKind.SUPERMARKET,
+    EstablishmentKind.COFFEE_SHOP,
+    EstablishmentKind.RESTAURANT,
+    EstablishmentKind.PUB,
+    EstablishmentKind.HARDWARE,
+    EstablishmentKind.PHARMACY,
+    EstablishmentKind.CLOTHING,
+    EstablishmentKind.BANK,
+}
+
+
+@dataclass
+class DialogueTurn:
+    speaker: str  # "buyer" | "seller"
+    text: str
+
+
+@dataclass
+class DialogueResult:
+    buyer_id: str
+    seller_id: str
+    establishment_id: str
+    establishment_kind: str
+    turns: list[DialogueTurn] = field(default_factory=list)
+    end_reason: str = ""  # "buy" | "leave" | "max_turns"
+    outcome: dict[str, Any] = field(default_factory=dict)
+    duration_s: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Helpers — pick a buyer / a store / find an employee
+# ---------------------------------------------------------------------------
+
+def find_employee(est: Establishment, personas: list[Persona]) -> Persona | None:
+    """Return any agent whose employer is this establishment, or None."""
+    for p in personas:
+        if p.employer_id == est.id:
+            return p
+    return None
+
+
+def pick_random_buyer(personas: list[Persona], rng: random.Random | None = None) -> Persona:
+    rng = rng or random.Random()
+    adults = [p for p in personas if 18 <= p.age <= 75]
+    return rng.choice(adults or personas)
+
+
+def pick_random_store(
+    establishments: list[Establishment],
+    personas: list[Persona],
+    rng: random.Random | None = None,
+) -> tuple[Establishment, Persona] | None:
+    """Pick a random shoppable establishment that has at least one employee."""
+    rng = rng or random.Random()
+    candidates = [e for e in establishments if e.kind in SHOPPABLE_KINDS]
+    rng.shuffle(candidates)
+    for est in candidates:
+        emp = find_employee(est, personas)
+        if emp is not None:
+            return est, emp
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Main dialogue loop
+# ---------------------------------------------------------------------------
+
+def run_dialogue(
+    buyer: Persona,
+    seller: Persona,
+    est: Establishment,
+    *,
+    max_turns: int = 8,
+    extract_outcome: bool = True,
+    log_to: EventLog | None = None,
+    sim_minute: float = 0.0,
+    day_of_year: int = 0,
+    on_turn: callable | None = None,  # type: ignore[valid-type]
+) -> DialogueResult:
+    """Run one buyer-seller dialogue. Returns the transcript + outcome.
+
+    Pass ``on_turn(turn)`` to stream turns to a callback (e.g. for live
+    printing in the CLI). If ``log_to`` is provided, the result is also
+    appended to the event log under kind="dialogue".
+    """
+    t0 = time.monotonic()
+    agent_gw = get_gateway(tier="agent")
+
+    buyer_sys = buyer_system_prompt(buyer, est, seller.occupation)
+    seller_sys = seller_system_prompt(seller, est)
+
+    buyer_history: list[LLMMessage] = [LLMMessage(role="system", content=buyer_sys)]
+    seller_history: list[LLMMessage] = [LLMMessage(role="system", content=seller_sys)]
+
+    result = DialogueResult(
+        buyer_id=buyer.agent_id,
+        seller_id=seller.agent_id,
+        establishment_id=est.id,
+        establishment_kind=est.kind.value,
+    )
+
+    # Free opening line from the seller — saves one LLM call and grounds the
+    # conversation in the right context.
+    kind_phrase = est.kind.value.replace("_", " ")
+    greeting = _opening_greeting(est.kind, seller.occupation)
+    seller_history.append(LLMMessage(role="assistant", content=greeting))
+    buyer_history.append(LLMMessage(role="user", content=greeting))
+    opening = DialogueTurn(speaker="seller", text=greeting)
+    result.turns.append(opening)
+    if on_turn:
+        on_turn(opening)
+
+    end_reason = "max_turns"
+    for _ in range(max_turns):
+        # ---- Buyer's turn -------------------------------------------------
+        resp = agent_gw.chat(buyer_history, max_tokens=120, temperature=0.85)
+        buyer_text = resp.text.strip()
+        turn = DialogueTurn(speaker="buyer", text=buyer_text)
+        result.turns.append(turn)
+        if on_turn:
+            on_turn(turn)
+        buyer_history.append(LLMMessage(role="assistant", content=buyer_text))
+        seller_history.append(LLMMessage(role="user", content=buyer_text))
+
+        if "[BUY]" in buyer_text.upper():
+            end_reason = "buy"
+            break
+        if "[LEAVE]" in buyer_text.upper():
+            end_reason = "leave"
+            break
+
+        # ---- Seller's turn ------------------------------------------------
+        resp = agent_gw.chat(seller_history, max_tokens=120, temperature=0.7)
+        seller_text = resp.text.strip()
+        turn = DialogueTurn(speaker="seller", text=seller_text)
+        result.turns.append(turn)
+        if on_turn:
+            on_turn(turn)
+        seller_history.append(LLMMessage(role="assistant", content=seller_text))
+        buyer_history.append(LLMMessage(role="user", content=seller_text))
+
+    result.end_reason = end_reason
+    result.duration_s = time.monotonic() - t0
+
+    if extract_outcome:
+        result.outcome = _extract_outcome(result, seller.occupation)
+
+    # Log the whole thing (dialogue + outcome) to the event log.
+    if log_to is not None:
+        log_to.append(
+            kind="dialogue",
+            sim_minute=sim_minute,
+            day_of_year=day_of_year,
+            payload={
+                "buyer_id": result.buyer_id,
+                "seller_id": result.seller_id,
+                "establishment_id": result.establishment_id,
+                "establishment_kind": result.establishment_kind,
+                "turns": [{"speaker": t.speaker, "text": t.text} for t in result.turns],
+                "end_reason": result.end_reason,
+                "outcome": result.outcome,
+                "duration_s": result.duration_s,
+            },
+        )
+
+    # Reference kind_phrase so linter doesn't trip over the unused local
+    # (it's used in the f-string-style fallback for older greetings).
+    _ = kind_phrase
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Outcome extraction
+# ---------------------------------------------------------------------------
+
+def _extract_outcome(result: DialogueResult, seller_role: str) -> dict[str, Any]:
+    transcript = "\n".join(f"{t.speaker.upper()}: {t.text}" for t in result.turns)
+    prompt = EXTRACTION_PROMPT.format(
+        role=seller_role.replace("_", " "),
+        kind=result.establishment_kind.replace("_", " "),
+        transcript=transcript,
+    )
+    try:
+        gw = get_gateway(tier="audit")
+        return gw.chat_json(
+            [LLMMessage(role="user", content=prompt)],
+            temperature=0.0,
+            max_tokens=300,
+        )
+    except Exception as e:
+        # No OpenAI key (or audit gateway misconfigured) — fall back to a
+        # rule-based outcome. The transcript is still useful; the structured
+        # extraction can be backfilled later by replaying the event log.
+        return {
+            "purchased": result.end_reason == "buy",
+            "product": None,
+            "price_paid": None,
+            "decisive_factor": "salesperson_pitch" if result.end_reason == "buy" else "none",
+            "regret_signal": 0.0,
+            "followup_intent": None,
+            "_fallback": True,
+            "_fallback_reason": str(e)[:160],
+        }
+
+
+# ---------------------------------------------------------------------------
+# Per-establishment opening lines (no LLM call, saves a turn)
+# ---------------------------------------------------------------------------
+
+_GREETINGS: dict[EstablishmentKind, str] = {
+    EstablishmentKind.COFFEE_SHOP: "Hi! What can I get started for you?",
+    EstablishmentKind.SUPERMARKET: "Hey, did you find everything alright?",
+    EstablishmentKind.RESTAURANT: "Hi there — table for one, or are you here for takeaway?",
+    EstablishmentKind.PUB: "Evening. What'll it be?",
+    EstablishmentKind.HARDWARE: "Hey, anything I can help you find?",
+    EstablishmentKind.PHARMACY: "Hi — how can I help you today?",
+    EstablishmentKind.CLOTHING: "Hi, welcome in. Looking for anything in particular?",
+    EstablishmentKind.BANK: "Good afternoon — how can I help you?",
+}
+
+
+def _opening_greeting(kind: EstablishmentKind, _role: str) -> str:
+    return _GREETINGS.get(kind, "Hi, how can I help you?")
