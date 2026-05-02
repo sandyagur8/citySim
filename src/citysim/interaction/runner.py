@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import random
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -63,6 +64,7 @@ class DialogueResult:
 # Helpers — pick a buyer / a store / find an employee
 # ---------------------------------------------------------------------------
 
+
 def find_employee(est: Establishment, personas: list[Persona]) -> Persona | None:
     """Return any agent whose employer is this establishment, or None."""
     for p in personas:
@@ -97,6 +99,7 @@ def pick_random_store(
 # Main dialogue loop
 # ---------------------------------------------------------------------------
 
+
 def run_dialogue(
     buyer: Persona,
     seller: Persona,
@@ -107,7 +110,7 @@ def run_dialogue(
     log_to: EventLog | None = None,
     sim_minute: float = 0.0,
     day_of_year: int = 0,
-    on_turn: callable | None = None,  # type: ignore[valid-type]
+    on_turn: Callable[[DialogueTurn], None] | None = None,
 ) -> DialogueResult:
     """Run one buyer-seller dialogue. Returns the transcript + outcome.
 
@@ -204,6 +207,7 @@ def run_dialogue(
 # ---------------------------------------------------------------------------
 # Outcome extraction
 # ---------------------------------------------------------------------------
+
 
 def _extract_outcome(result: DialogueResult, seller_role: str) -> dict[str, Any]:
     transcript = "\n".join(f"{t.speaker.upper()}: {t.text}" for t in result.turns)

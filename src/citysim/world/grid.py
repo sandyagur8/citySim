@@ -75,12 +75,8 @@ def generate_grid(
     zoning[radius >= 0.85] = Zoning.RESIDENTIAL  # outer ring stays residential
 
     # Industrial wedges in two opposite quadrants on the periphery
-    industrial_mask = (
-        (radius > 0.7)
-        & (
-            ((angle > 0.6) & (angle < 1.4))
-            | ((angle < -1.7) & (angle > -2.5))
-        )
+    industrial_mask = (radius > 0.7) & (
+        ((angle > 0.6) & (angle < 1.4)) | ((angle < -1.7) & (angle > -2.5))
     )
     zoning[industrial_mask] = Zoning.INDUSTRIAL
 

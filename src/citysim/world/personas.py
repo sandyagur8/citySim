@@ -28,19 +28,18 @@ can be queried by segment.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 import numpy as np
 
 from citysim.store import PersonaRow, PersonaStore
 from citysim.world.agents import (
-    _OCCUPATIONS_BY_KIND,
-    _residential_cells,
     Agent,
     TransportMode,
+    _OCCUPATIONS_BY_KIND,
+    _residential_cells,
 )
-from citysim.world.establishments import Establishment, EstablishmentKind
+from citysim.world.establishments import Establishment
 from citysim.world.grid import CityGrid
 
 
@@ -53,8 +52,14 @@ EDUCATIONS = ["none", "high_school", "some_college", "bachelors", "graduate"]
 INCOME_BANDS = ["very_low", "low", "middle", "upper_middle", "high"]
 
 NEED_CATEGORIES = [
-    "food", "clothing", "healthcare", "leisure", "transport",
-    "household_goods", "education", "social",
+    "food",
+    "clothing",
+    "healthcare",
+    "leisure",
+    "transport",
+    "household_goods",
+    "education",
+    "social",
 ]
 
 
@@ -137,7 +142,9 @@ class Persona:
             household_id=row.household_id,
             household_role=row.household_role,
             home_cell=(row.home_x, row.home_y),
-            work_cell=(row.work_x, row.work_y) if row.work_x is not None and row.work_y is not None else None,
+            work_cell=(row.work_x, row.work_y)
+            if row.work_x is not None and row.work_y is not None
+            else None,
             mode=TransportMode(row.mode),
             needs=dict(row.needs),
             prefs=dict(row.prefs),
@@ -149,8 +156,9 @@ class Persona:
 # Conditional samplers
 # ---------------------------------------------------------------------------
 
+
 def _sample_age(rng: np.random.Generator) -> int:
-    """Rough US-ish population pyramid: 0–17 23%, 18–64 60%, 65+ 17%."""
+    """Rough US-ish population pyramid: 0-17 23%, 18-64 60%, 65+ 17%."""
     bucket = rng.choice(3, p=[0.23, 0.60, 0.17])
     if bucket == 0:
         return int(rng.integers(0, 18))
@@ -187,11 +195,11 @@ def _sample_income_band(rng: np.random.Generator, age: int, education: str) -> s
     if age < 18:
         return "very_low"  # represented through the household head's income later
     edu_to_dist = {
-        "none":         [0.45, 0.35, 0.15, 0.04, 0.01],
-        "high_school":  [0.20, 0.35, 0.30, 0.12, 0.03],
+        "none": [0.45, 0.35, 0.15, 0.04, 0.01],
+        "high_school": [0.20, 0.35, 0.30, 0.12, 0.03],
         "some_college": [0.12, 0.28, 0.35, 0.20, 0.05],
-        "bachelors":    [0.05, 0.15, 0.30, 0.35, 0.15],
-        "graduate":     [0.02, 0.08, 0.20, 0.35, 0.35],
+        "bachelors": [0.05, 0.15, 0.30, 0.35, 0.15],
+        "graduate": [0.02, 0.08, 0.20, 0.35, 0.35],
     }
     p = edu_to_dist[education]
     # Retirees compress toward middle/low.
@@ -207,12 +215,12 @@ def _sample_household_role(rng: np.random.Generator, age: int) -> str:
         return "child"
     if age < 25:
         # young-adult: still at home or living solo with roommates
-        return rng.choice(["partner", "single", "single"])  # weighted
+        return str(rng.choice(["partner", "single", "single"]))  # weighted
     if age < 40:
-        return rng.choice(["single", "partner", "partner", "head_with_kids"])
+        return str(rng.choice(["single", "partner", "partner", "head_with_kids"]))
     if age < 65:
-        return rng.choice(["partner", "head_with_kids", "single"])
-    return rng.choice(["single", "partner"])
+        return str(rng.choice(["partner", "head_with_kids", "single"]))
+    return str(rng.choice(["single", "partner"]))
 
 
 def _sample_mode(
@@ -224,11 +232,11 @@ def _sample_mode(
         return TransportMode.WALK if age >= 65 else TransportMode.TRANSIT
     # Probability of car ownership rises with income.
     by_income = {
-        "very_low":     [0.30, 0.20, 0.45, 0.05],
-        "low":          [0.20, 0.20, 0.40, 0.20],
-        "middle":       [0.10, 0.15, 0.30, 0.45],
+        "very_low": [0.30, 0.20, 0.45, 0.05],
+        "low": [0.20, 0.20, 0.40, 0.20],
+        "middle": [0.10, 0.15, 0.30, 0.45],
         "upper_middle": [0.05, 0.10, 0.20, 0.65],
-        "high":         [0.03, 0.05, 0.12, 0.80],
+        "high": [0.03, 0.05, 0.12, 0.80],
     }
     p = by_income[income_band]
     options = [TransportMode.WALK, TransportMode.BIKE, TransportMode.TRANSIT, TransportMode.CAR]
@@ -240,7 +248,7 @@ def _sample_prefs(
 ) -> dict[str, float | str]:
     # All scalars in [0, 1]. The LLM dialogue prompt reads these as
     # narrative levers ("highly novelty-seeking", "brand-loyal", etc.).
-    novelty = float(rng.beta(2.0, 3.0))           # younger biased high via offset below
+    novelty = float(rng.beta(2.0, 3.0))  # younger biased high via offset below
     if age < 30:
         novelty = min(1.0, novelty + 0.15)
     if age >= 60:
@@ -266,8 +274,16 @@ def _sample_prefs(
 
     # A primary value tag — purely narrative, lets dialogue prompts colour
     # the buyer's voice without overloading numeric fields.
-    value_tags = ["family", "career", "community", "self_expression",
-                  "health", "frugality", "status", "exploration"]
+    value_tags = [
+        "family",
+        "career",
+        "community",
+        "self_expression",
+        "health",
+        "frugality",
+        "status",
+        "exploration",
+    ]
     value = value_tags[int(rng.integers(0, len(value_tags)))]
 
     return {
@@ -359,13 +375,14 @@ def _card_text(p: Persona) -> str:
         f"{pronoun} {role_phrase}. "
         f"At the moment, {top_need.replace('_', ' ')} is the most pressing thing on {poss} mind. "
         f"{pronoun} {novelty_phrase} and {price_phrase}. "
-        f"What {pronoun.lower()} cares about most: {value.replace('_', ' ')}."
+        f"What {pronoun.lower()} cares about most: {str(value).replace('_', ' ')}."
     )
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def generate_personas(
     grid: CityGrid,
@@ -423,9 +440,12 @@ def generate_personas(
             employer_id: str | None = employer.id
         else:
             occupation = (
-                "student" if age < 22
-                else "retired" if age >= 65
-                else "homemaker" if role == "head_with_kids"
+                "student"
+                if age < 22
+                else "retired"
+                if age >= 65
+                else "homemaker"
+                if role == "head_with_kids"
                 else "unemployed"
             )
             work_cell = None

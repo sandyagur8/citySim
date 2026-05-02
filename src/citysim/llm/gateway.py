@@ -73,9 +73,7 @@ class LLMGateway:
                 )
             self.model = model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
             self.base_url = (
-                base_url
-                or os.environ.get("OPENAI_BASE_URL")
-                or "https://api.openai.com/v1"
+                base_url or os.environ.get("OPENAI_BASE_URL") or "https://api.openai.com/v1"
             ).rstrip("/")
         elif self.provider == "ollama-openai":
             # Ollama exposes an OpenAI-compatible endpoint at /v1/chat/completions.
@@ -83,14 +81,11 @@ class LLMGateway:
             self.api_key = api_key or os.environ.get("OPENAI_API_KEY") or "ollama"
             self.model = model or os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
             self.base_url = (
-                base_url
-                or os.environ.get("OLLAMA_BASE_URL")
-                or "http://localhost:11434/v1"
+                base_url or os.environ.get("OLLAMA_BASE_URL") or "http://localhost:11434/v1"
             ).rstrip("/")
         else:
             raise ValueError(
-                f"Unknown LLM provider {self.provider!r}. "
-                "Supported: 'openai', 'ollama-openai'."
+                f"Unknown LLM provider {self.provider!r}. Supported: 'openai', 'ollama-openai'."
             )
 
     # ------------------------------------------------------------------
@@ -163,11 +158,10 @@ class LLMGateway:
             response_format={"type": "json_object"},
         )
         try:
-            return json.loads(resp.text)
+            parsed: dict[str, Any] = json.loads(resp.text)
+            return parsed
         except json.JSONDecodeError as e:
-            raise ValueError(
-                f"LLM returned non-JSON content: {resp.text[:200]!r}"
-            ) from e
+            raise ValueError(f"LLM returned non-JSON content: {resp.text[:200]!r}") from e
 
 
 def _normalize_msg(m: LLMMessage | dict[str, str]) -> dict[str, str]:
@@ -184,7 +178,7 @@ def _normalize_msg(m: LLMMessage | dict[str, str]) -> dict[str, str]:
 #
 #   agent  → local Ollama (no per-token cost; small model is fine for
 #            persona-conditioned dialogue and short-form responses)
-#   audit  → OpenAI (better quality for the 1–5% audit slice and for
+#   audit  → OpenAI (better quality for the 1-5% audit slice and for
 #            structured outcome extraction with response_format=json_object)
 #
 # Both are overridable by env vars so a user can flip "agent" to OpenAI

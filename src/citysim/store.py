@@ -35,6 +35,7 @@ from typing import Any
 # Location resolution: $CITYSIM_HOME, else ~/.citysim
 # ---------------------------------------------------------------------------
 
+
 def default_home() -> Path:
     home = os.environ.get("CITYSIM_HOME")
     if home:
@@ -228,9 +229,7 @@ class PersonaStore:
 
     def get(self, agent_id: str) -> PersonaRow | None:
         with self._connect() as c:
-            r = c.execute(
-                "SELECT * FROM personas WHERE agent_id=?", (agent_id,)
-            ).fetchone()
+            r = c.execute("SELECT * FROM personas WHERE agent_id=?", (agent_id,)).fetchone()
         return PersonaRow.from_db(r) if r else None
 
     def by_segment(
@@ -284,6 +283,7 @@ class PersonaStore:
 # ---------------------------------------------------------------------------
 # Event log (JSONL → DuckDB-readable)
 # ---------------------------------------------------------------------------
+
 
 class EventLog:
     """Append-only event log, one JSONL file per simulated day.

@@ -36,9 +36,7 @@ def sun_altitude(latitude_deg: float, day_of_year: int, minute_of_day: int) -> f
     # We use clock time as a proxy for solar time; close enough for visuals.
     hours_from_noon = minute_of_day / 60.0 - 12.0
     hour_angle = math.radians(15.0 * hours_from_noon)
-    sin_alt = (
-        math.sin(lat) * math.sin(decl) + math.cos(lat) * math.cos(decl) * math.cos(hour_angle)
-    )
+    sin_alt = math.sin(lat) * math.sin(decl) + math.cos(lat) * math.cos(decl) * math.cos(hour_angle)
     sin_alt = max(-1.0, min(1.0, sin_alt))
     altitude = math.asin(sin_alt)  # radians, can be negative when sun is below horizon
     if altitude <= 0:
@@ -62,5 +60,5 @@ def sunrise_sunset(latitude_deg: float, day_of_year: int) -> tuple[int, int]:
     if cos_h <= -1.0:  # polar day
         return (0, 24 * 60)
     h = math.degrees(math.acos(cos_h))
-    half_day_minutes = int(round(h * 4))  # 1 deg = 4 minutes of clock time
+    half_day_minutes = round(h * 4)  # 1 deg = 4 minutes of clock time
     return (12 * 60 - half_day_minutes, 12 * 60 + half_day_minutes)
