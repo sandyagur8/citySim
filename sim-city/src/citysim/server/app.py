@@ -261,6 +261,53 @@ def create_app(
             ),
         }
 
+    @app.patch("/api/agent/by-ens/{ens_name:path}/persona")
+    async def update_agent_persona_by_ens(
+        ens_name: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        sim = sim_holder.get("sim")
+        if sim is None or sim.persona_store is None:
+            raise HTTPException(status_code=503, detail="Sim not ready")
+
+        query = ens_name.strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="ENS name required")
+
+        row = sim.persona_store.get_by_ens_name(query)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"No agent found for ENS: {query}")
+
+        changed = False
+        if "occupation" in payload:
+            occ = str(payload.get("occupation") or "").strip()
+            if not occ:
+                raise HTTPException(status_code=400, detail="occupation cannot be empty")
+            row.occupation = occ
+            changed = True
+        if "card_text" in payload:
+            card = str(payload.get("card_text") or "").strip()
+            if not card:
+                raise HTTPException(status_code=400, detail="card_text cannot be empty")
+            row.card_text = card
+            changed = True
+
+        if not changed:
+            raise HTTPException(status_code=400, detail="No editable persona fields provided")
+
+        sim.persona_store.insert_many([row])
+
+        persona = sim.persona_by_id.get(row.agent_id)
+        if persona is not None:
+            persona.occupation = row.occupation
+            persona.card_text = row.card_text
+        for agent in sim.agents:
+            if agent.id == row.agent_id:
+                agent.occupation = row.occupation
+                break
+
+        return {"ok": True, "agent_id": row.agent_id, "ens_name": row.ens_name}
+
     # ---------- Product brief CRUD ----------
 
     @app.get("/api/product")

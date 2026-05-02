@@ -69,6 +69,23 @@ export async function fetchAgentByEns(ensName: string): Promise<EnsAgentLookup |
   return jsonOrNull<EnsAgentLookup>(res);
 }
 
+export async function updateAgentPersonaByEns(
+  ensName: string,
+  payload: { occupation?: string; card_text?: string },
+): Promise<{ ok: boolean; agent_id: string; ens_name: string | null }> {
+  const name = ensName.trim();
+  const res = await fetch(`${base}/api/agent/by-ens/${encodeURIComponent(name)}/persona`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => res.statusText);
+    throw new Error(`HTTP ${res.status}: ${detail}`);
+  }
+  return (await res.json()) as { ok: boolean; agent_id: string; ens_name: string | null };
+}
+
 // Categories that match `EstablishmentKind` values that make sense for a
 // shoppable product test. Keep in sync with SHOPPABLE_KINDS in runner.py.
 export const PRODUCT_CATEGORIES: { value: string; label: string }[] = [
