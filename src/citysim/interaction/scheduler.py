@@ -33,7 +33,8 @@ import asyncio
 import logging
 import os
 import random
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 from citysim.interaction.runner import (
     SHOPPABLE_KINDS,
@@ -129,6 +130,7 @@ async def dialogue_worker(
     pause_s: float | None = None,
     max_turns: int | None = None,
     extract_outcome: bool = True,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> None:
     """Continuously fire one dialogue at a time.
 
@@ -147,6 +149,12 @@ async def dialogue_worker(
     baseline_ratio = max(0.0, min(1.0, _env_float("CITYSIM_BASELINE_RATIO", 0.25)))
 
     brief = load_product()
+    # Note the file's mtime so we can hot-reload when the REST CRUD endpoints
+    # rewrite product.json. Avoids restarting the server during a demo.
+    from citysim.product import default_product_path
+
+    product_path = default_product_path()
+    last_mtime: float = product_path.stat().st_mtime if product_path.exists() else 0.0
     if brief is not None:
         log.info(
             "dialogue_worker: PRODUCT mode - '%s' at %s, $%.2f. Target: ages=%s, income=%s",
@@ -176,6 +184,32 @@ async def dialogue_worker(
                 continue
             if sim.paused:
                 continue
+
+            # Hot-reload the brief if product.json has changed on disk.
+            try:
+                if product_path.exists():
+                    mtime = product_path.stat().st_mtime
+                    if mtime != last_mtime:
+                        new_brief = load_product()
+                        if (new_brief is None) != (brief is None) or (
+                            new_brief is not None
+                            and brief is not None
+                            and new_brief.to_dict() != brief.to_dict()
+                        ):
+                            brief = new_brief
+                            log.info(
+                                "dialogue_worker: reloaded product brief (%s)",
+                                brief.name if brief else "cleared",
+                            )
+                        last_mtime = mtime
+                elif last_mtime > 0.0:
+                    # File deleted -> drop into generic mode
+                    if brief is not None:
+                        log.info("dialogue_worker: product brief cleared from disk")
+                    brief = None
+                    last_mtime = 0.0
+            except Exception:
+                log.debug("dialogue_worker: brief reload check failed", exc_info=True)
 
             iteration += 1
 
@@ -236,6 +270,7 @@ async def dialogue_worker(
                 product=brief,
                 arm=arm,
                 targeted=targeted,
+                on_event=on_event,
             )
             log.debug(
                 "dialogue: buyer=%s seller=%s est=%s arm=%s targeted=%s day=%d",

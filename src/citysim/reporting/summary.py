@@ -118,6 +118,60 @@ class DaySummary:
     def has_product(self) -> bool:
         return self.n_product_dialogues > 0
 
+    def to_dict(self) -> dict[str, object]:
+        """JSON-serialisable view of the summary, used for the WebSocket
+        ``day_summary`` message and the ``GET /api/summary/{day}`` endpoint.
+        """
+
+        def seg(s: SegmentStats) -> dict[str, object]:
+            return {
+                "label": s.label,
+                "count": s.count,
+                "purchases": s.purchases,
+                "conversion": s.conversion,
+            }
+
+        return {
+            "day": self.day,
+            "n_dialogues": self.n_dialogues,
+            "n_purchases": self.n_purchases,
+            "conversion": self.conversion,
+            "avg_price_paid": self.avg_price_paid,
+            "total_spend": self.total_spend,
+            "fallback_extractions": self.fallback_extractions,
+            "by_kind": {k: seg(v) for k, v in self.by_kind.items()},
+            "by_income_band": {k: seg(v) for k, v in self.by_income_band.items()},
+            "top_decisive_factors": list(self.top_decisive_factors),
+            "top_establishments": list(self.top_establishments),
+            # Product
+            "has_product": self.has_product,
+            "product_name": self.product_name,
+            "n_product_dialogues": self.n_product_dialogues,
+            "n_units_sold": self.n_units_sold,
+            "product_revenue": self.product_revenue,
+            "avg_product_price": self.avg_product_price,
+            "product_conversion": self.product_conversion,
+            "top_intrinsic_motivators": list(self.top_intrinsic_motivators),
+            "top_winning_phrases": list(self.top_winning_phrases),
+            "top_objections": list(self.top_objections),
+            "by_age_band": {k: seg(v) for k, v in self.by_age_band.items()},
+            "arm_random": seg(self.arm_random),
+            "arm_targeted": seg(self.arm_targeted),
+            "relevant_personas": [
+                {
+                    "buyer_id": r.buyer_id,
+                    "age": r.age,
+                    "gender": r.gender,
+                    "occupation": r.occupation,
+                    "income_band": r.income_band,
+                    "purchased": r.purchased,
+                    "motivator": r.motivator,
+                    "targeted": r.targeted,
+                }
+                for r in self.relevant_personas
+            ],
+        }
+
 
 # ---------------------------------------------------------------------------
 # Aggregation

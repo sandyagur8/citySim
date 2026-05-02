@@ -40,10 +40,129 @@ export type ClockPayload = {
   paused: boolean;
 };
 
+// ---------------------------------------------------------------------------
+// Product / dialogue / summary wire types (mirror the Python backend's JSON)
+// ---------------------------------------------------------------------------
+
+export type TargetFilter = {
+  age_bands: string[];
+  income_bands: string[];
+  occupation_regex: string | null;
+};
+
+export type ProductBriefDict = {
+  name: string;
+  category: string;
+  price: number;
+  short_description: string;
+  detailed_description: string;
+  target_audience: string;
+  target: TargetFilter;
+  key_features: string[];
+  positioning: string;
+  currency: string;
+};
+
+export type LiveStats = {
+  n_dialogues: number;
+  n_purchases: number;
+  n_product_dialogues: number;
+  n_units_sold: number;
+  product_revenue: number;
+  arm_random: { count: number; purchases: number };
+  arm_targeted: { count: number; purchases: number };
+};
+
+export type DialogueOutcome = {
+  purchased?: boolean;
+  units?: number;
+  price_paid?: number | null;
+  decisive_factor?: string;
+  intrinsic_motivator?: string;
+  seller_winning_phrase?: string | null;
+  objections_raised?: string[];
+  price_sensitivity?: string;
+  target_fit?: string;
+  regret_signal?: number;
+  followup_intent?: string | null;
+};
+
+export type DialogueCard = {
+  dialogue_id: string;
+  buyer_id: string;
+  buyer_age?: number;
+  buyer_occupation?: string;
+  establishment_id: string;
+  establishment_kind: string;
+  product_id: string | null;
+  dialogue_kind: 'product' | 'generic';
+  arm: 'random' | 'targeted';
+  targeted: boolean;
+  sim_minute: number;
+  status: 'live' | 'ended';
+  end_reason?: string;
+  outcome?: DialogueOutcome | null;
+  purchased?: boolean;
+  // Streaming-only field — populated on the client as turns arrive.
+  turns?: { speaker: 'buyer' | 'seller'; text: string }[];
+};
+
+export type SegmentDict = {
+  label: string;
+  count: number;
+  purchases: number;
+  conversion: number;
+};
+
+export type DaySummaryDict = {
+  day: number;
+  n_dialogues: number;
+  n_purchases: number;
+  conversion: number;
+  avg_price_paid: number | null;
+  total_spend: number;
+  fallback_extractions: number;
+  by_kind: Record<string, SegmentDict>;
+  by_income_band: Record<string, SegmentDict>;
+  top_decisive_factors: [string, number][];
+  top_establishments: [string, number][];
+  has_product: boolean;
+  product_name: string | null;
+  n_product_dialogues: number;
+  n_units_sold: number;
+  product_revenue: number;
+  avg_product_price: number | null;
+  product_conversion: number;
+  top_intrinsic_motivators: [string, number][];
+  top_winning_phrases: [string, number][];
+  top_objections: [string, number][];
+  by_age_band: Record<string, SegmentDict>;
+  arm_random: SegmentDict;
+  arm_targeted: SegmentDict;
+  relevant_personas: {
+    buyer_id: string;
+    age: number | null;
+    gender: string | null;
+    occupation: string | null;
+    income_band: string | null;
+    purchased: boolean;
+    motivator: string;
+    targeted: boolean;
+  }[];
+};
+
+// ---------------------------------------------------------------------------
+// Server -> client messages
+// ---------------------------------------------------------------------------
+
 export type InitMessage = {
   type: 'init';
   world: WorldPayload;
   clock: ClockPayload;
+  product: ProductBriefDict | null;
+  stats: LiveStats;
+  recent_dialogues: DialogueCard[];
+  last_day_summary: DaySummaryDict | null;
 };
 
 // Each row: [x*1000, y*1000, activity_code]
@@ -53,9 +172,67 @@ export type TickMessage = {
   day_of_year: number;
   day_of_week: number;
   positions: number[][];
+  stats: LiveStats;
 };
 
-export type ServerMessage = InitMessage | TickMessage;
+export type DialogueStartedMessage = {
+  type: 'dialogue_started';
+  dialogue_id: string;
+  buyer_id: string;
+  buyer_age?: number;
+  buyer_gender?: string;
+  buyer_occupation?: string;
+  buyer_income_band?: string;
+  seller_id: string;
+  seller_occupation?: string;
+  establishment_id: string;
+  establishment_kind: string;
+  product_id: string | null;
+  dialogue_kind: 'product' | 'generic';
+  arm: 'random' | 'targeted';
+  targeted: boolean;
+  sim_minute: number;
+  day_of_year: number;
+};
+
+export type DialogueTurnMessage = {
+  type: 'dialogue_turn';
+  dialogue_id: string;
+  speaker: 'buyer' | 'seller';
+  text: string;
+};
+
+export type DialogueEndedMessage = {
+  type: 'dialogue_ended';
+  dialogue_id: string;
+  end_reason: string;
+  duration_s: number;
+  outcome: DialogueOutcome;
+  dialogue_kind: 'product' | 'generic';
+  arm: 'random' | 'targeted';
+  targeted: boolean;
+  product_id: string | null;
+};
+
+export type DaySummaryMessage = {
+  type: 'day_summary';
+  day: number;
+  summary: DaySummaryDict;
+};
+
+export type ProductUpdatedMessage = {
+  type: 'product_updated';
+  product: ProductBriefDict | null;
+};
+
+export type ServerMessage =
+  | InitMessage
+  | TickMessage
+  | DialogueStartedMessage
+  | DialogueTurnMessage
+  | DialogueEndedMessage
+  | DaySummaryMessage
+  | ProductUpdatedMessage;
 
 export type ControlMessage =
   | { type: 'set_speed'; value: number }

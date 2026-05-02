@@ -1,11 +1,16 @@
 // WebSocket client for the simulator. Manages the connection lifecycle,
-// parses init/tick messages, smooths agent positions between ticks for
-// glassy visual movement, and exposes a tiny API for sending controls.
+// parses init/tick/dialogue/summary messages, smooths agent positions
+// between ticks for glassy visual movement, and exposes a tiny API for
+// sending controls.
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ClockPayload,
   ControlMessage,
+  DaySummaryDict,
+  DialogueCard,
+  LiveStats,
+  ProductBriefDict,
   ServerMessage,
   WorldPayload,
 } from '../lib/types';
@@ -13,6 +18,19 @@ import type {
 // Must match BROADCAST_EVERY_SIM_MIN in src/citysim/server/sim.py.
 // Lower = smoother animation at high speed multipliers (e.g. 1440×).
 const BROADCAST_EVERY_SIM_MIN = 2;
+
+// Cap matched to backend's _RECENT_DIALOGUES_MAX.
+const RECENT_DIALOGUES_MAX = 30;
+
+const EMPTY_STATS: LiveStats = {
+  n_dialogues: 0,
+  n_purchases: 0,
+  n_product_dialogues: 0,
+  n_units_sold: 0,
+  product_revenue: 0,
+  arm_random: { count: 0, purchases: 0 },
+  arm_targeted: { count: 0, purchases: 0 },
+};
 
 export type SmoothedPositions = {
   // Float32Array length = nAgents * 2, layout [x0, y0, x1, y1, ...]
@@ -27,6 +45,13 @@ export type SimStream = {
   world: WorldPayload | null;
   clock: ClockPayload | null;
   smoothed: SmoothedPositions | null;
+  product: ProductBriefDict | null;
+  stats: LiveStats;
+  recentDialogues: DialogueCard[];
+  daySummary: DaySummaryDict | null;
+  /** Most recently surfaced summary (modal-trigger). Null after dismissal. */
+  pendingSummary: DaySummaryDict | null;
+  dismissSummary: () => void;
   send: (m: ControlMessage) => void;
 };
 
@@ -35,12 +60,27 @@ export function useSimStream(url = '/ws'): SimStream {
   const [world, setWorld] = useState<WorldPayload | null>(null);
   const [clock, setClock] = useState<ClockPayload | null>(null);
   const [smoothed, setSmoothed] = useState<SmoothedPositions | null>(null);
+  const [product, setProduct] = useState<ProductBriefDict | null>(null);
+  const [stats, setStats] = useState<LiveStats>(EMPTY_STATS);
+  const [recentDialogues, setRecentDialogues] = useState<DialogueCard[]>([]);
+  const [daySummary, setDaySummary] = useState<DaySummaryDict | null>(null);
+  const [pendingSummary, setPendingSummary] = useState<DaySummaryDict | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
 
   // Latest two received tick samples, used for interpolation
-  const prevSampleRef = useRef<{ pos: Float32Array; act: Uint8Array; min: number; t: number } | null>(null);
-  const currSampleRef = useRef<{ pos: Float32Array; act: Uint8Array; min: number; t: number } | null>(null);
+  const prevSampleRef = useRef<{
+    pos: Float32Array;
+    act: Uint8Array;
+    min: number;
+    t: number;
+  } | null>(null);
+  const currSampleRef = useRef<{
+    pos: Float32Array;
+    act: Uint8Array;
+    min: number;
+    t: number;
+  } | null>(null);
   // Cache of speed for tick-interval estimation
   const speedRef = useRef<number>(60);
 
@@ -53,13 +93,17 @@ export function useSimStream(url = '/ws'): SimStream {
     };
   }, []);
 
+  const dismissSummary = useCallback(() => setPendingSummary(null), []);
+
   useEffect(() => {
     let cancelled = false;
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 
     function connect() {
       const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const fullUrl = url.startsWith('ws') ? url : `${wsProto}//${window.location.host}${url}`;
+      const fullUrl = url.startsWith('ws')
+        ? url
+        : `${wsProto}//${window.location.host}${url}`;
       const ws = new WebSocket(fullUrl);
       wsRef.current = ws;
 
@@ -91,6 +135,11 @@ export function useSimStream(url = '/ws'): SimStream {
         if (msg.type === 'init') {
           setWorld(msg.world);
           setClock(msg.clock);
+          setProduct(msg.product);
+          setStats(msg.stats ?? EMPTY_STATS);
+          setRecentDialogues(msg.recent_dialogues ?? []);
+          setDaySummary(msg.last_day_summary);
+          // Don't auto-pop the modal on connect — the user already saw it.
           speedRef.current = msg.clock.speed_multiplier;
           // Initialise samples from current world (everyone at home)
           const n = msg.world.agents.length;
@@ -116,8 +165,10 @@ export function useSimStream(url = '/ws'): SimStream {
             act[i] = row[2];
           }
           const t = performance.now();
-          prevSampleRef.current = currSampleRef.current ?? { pos, act, min: msg.sim_minute, t };
+          prevSampleRef.current =
+            currSampleRef.current ?? { pos, act, min: msg.sim_minute, t };
           currSampleRef.current = { pos, act, min: msg.sim_minute, t };
+          if (msg.stats) setStats(msg.stats);
           setClock((c) =>
             c
               ? {
@@ -128,6 +179,62 @@ export function useSimStream(url = '/ws'): SimStream {
                 }
               : c,
           );
+        } else if (msg.type === 'dialogue_started') {
+          setRecentDialogues((rs) => {
+            const card: DialogueCard = {
+              dialogue_id: msg.dialogue_id,
+              buyer_id: msg.buyer_id,
+              buyer_age: msg.buyer_age,
+              buyer_occupation: msg.buyer_occupation,
+              establishment_id: msg.establishment_id,
+              establishment_kind: msg.establishment_kind,
+              product_id: msg.product_id,
+              dialogue_kind: msg.dialogue_kind,
+              arm: msg.arm,
+              targeted: msg.targeted,
+              sim_minute: msg.sim_minute,
+              status: 'live',
+              outcome: null,
+              turns: [],
+            };
+            return [card, ...rs].slice(0, RECENT_DIALOGUES_MAX);
+          });
+        } else if (msg.type === 'dialogue_turn') {
+          setRecentDialogues((rs) =>
+            rs.map((c) =>
+              c.dialogue_id === msg.dialogue_id
+                ? {
+                    ...c,
+                    turns: [
+                      ...(c.turns ?? []),
+                      { speaker: msg.speaker, text: msg.text },
+                    ],
+                  }
+                : c,
+            ),
+          );
+        } else if (msg.type === 'dialogue_ended') {
+          const purchased = !!(
+            msg.outcome?.purchased || msg.end_reason === 'buy'
+          );
+          setRecentDialogues((rs) =>
+            rs.map((c) =>
+              c.dialogue_id === msg.dialogue_id
+                ? {
+                    ...c,
+                    status: 'ended',
+                    end_reason: msg.end_reason,
+                    outcome: msg.outcome,
+                    purchased,
+                  }
+                : c,
+            ),
+          );
+        } else if (msg.type === 'day_summary') {
+          setDaySummary(msg.summary);
+          setPendingSummary(msg.summary);
+        } else if (msg.type === 'product_updated') {
+          setProduct(msg.product);
         }
       };
     }
@@ -150,17 +257,13 @@ export function useSimStream(url = '/ws'): SimStream {
       const curr = currSampleRef.current;
       if (!prev || !curr) return;
       const speed = speedRef.current;
-      // Expected tick interval in real ms: (BROADCAST_EVERY_SIM_MIN sim min) * (60s/min) / (speed sim-min / real-s)
-      // Wait — speed = real-time multiplier, where 60x means 60 sim seconds = 1 real second.
-      // BROADCAST_EVERY_SIM_MIN is in sim minutes = sim seconds * 60.
+      // Expected tick interval in real ms:
       // expectedRealMs = BROADCAST_EVERY_SIM_MIN * 60 * 1000 / speed
       const expected = (BROADCAST_EVERY_SIM_MIN * 60 * 1000) / Math.max(speed, 0.001);
       const elapsed = performance.now() - curr.t;
       const t = Math.max(0, Math.min(1, elapsed / Math.max(expected, 1)));
       const n = curr.pos.length / 2;
       const pos = new Float32Array(n * 2);
-      // If activity differs (e.g. arrived), don't interpolate position — snap to curr.
-      // For now we always lerp; the backend already interpolates during commute.
       for (let i = 0; i < n; i++) {
         const px = prev.pos[i * 2];
         const py = prev.pos[i * 2 + 1];
@@ -181,5 +284,17 @@ export function useSimStream(url = '/ws'): SimStream {
     if (clock) speedRef.current = clock.speed_multiplier;
   }, [clock?.speed_multiplier]);
 
-  return { connected, world, clock, smoothed, send };
+  return {
+    connected,
+    world,
+    clock,
+    smoothed,
+    product,
+    stats,
+    recentDialogues,
+    daySummary,
+    pendingSummary,
+    dismissSummary,
+    send,
+  };
 }

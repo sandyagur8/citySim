@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import random
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -71,6 +72,8 @@ class DialogueResult:
     dialogue_kind: str = "generic"  # "product" | "generic"
     arm: str = "random"  # "random" | "targeted" — A/B sampling arm
     targeted: bool = False  # whether buyer matched the product target filter
+    # Correlation id (set by run_dialogue) so streaming events can be tied to one row.
+    dialogue_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +127,7 @@ def run_dialogue(
     sim_minute: float = 0.0,
     day_of_year: int = 0,
     on_turn: Callable[[DialogueTurn], None] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
     product: ProductBrief | None = None,
     arm: str = "random",
     targeted: bool = False,
@@ -133,6 +137,14 @@ def run_dialogue(
     Pass ``on_turn(turn)`` to stream turns to a callback (e.g. for live
     printing in the CLI). If ``log_to`` is provided, the result is also
     appended to the event log under kind="dialogue".
+
+    Pass ``on_event(payload)`` to stream structured live events. The runner
+    fires three event types — all keyed by ``dialogue_id`` so a UI can
+    correlate them:
+
+    * ``dialogue_started``: includes buyer/seller/establishment/product info
+    * ``dialogue_turn``: one per spoken turn (speaker + text)
+    * ``dialogue_ended``: end_reason + extracted outcome + duration
 
     If ``product`` is provided AND its category matches ``est.kind``, the
     seller pitches that specific product, the buyer evaluates buying it,
@@ -152,6 +164,7 @@ def run_dialogue(
     buyer_history: list[LLMMessage] = [LLMMessage(role="system", content=buyer_sys)]
     seller_history: list[LLMMessage] = [LLMMessage(role="system", content=seller_sys)]
 
+    dialogue_id = uuid.uuid4().hex[:12]
     result = DialogueResult(
         buyer_id=buyer.agent_id,
         seller_id=seller.agent_id,
@@ -161,7 +174,51 @@ def run_dialogue(
         dialogue_kind="product" if is_product_dialogue else "generic",
         arm=arm,
         targeted=targeted,
+        dialogue_id=dialogue_id,
     )
+
+    def _emit_turn(t: DialogueTurn) -> None:
+        if on_turn is not None:
+            on_turn(t)
+        if on_event is not None:
+            try:
+                on_event(
+                    {
+                        "type": "dialogue_turn",
+                        "dialogue_id": dialogue_id,
+                        "speaker": t.speaker,
+                        "text": t.text,
+                    }
+                )
+            except Exception:
+                pass
+
+    # Fire dialogue_started up front so the UI can render an empty card.
+    if on_event is not None:
+        try:
+            on_event(
+                {
+                    "type": "dialogue_started",
+                    "dialogue_id": dialogue_id,
+                    "buyer_id": buyer.agent_id,
+                    "buyer_age": buyer.age,
+                    "buyer_gender": buyer.gender,
+                    "buyer_occupation": buyer.occupation,
+                    "buyer_income_band": buyer.income_band,
+                    "seller_id": seller.agent_id,
+                    "seller_occupation": seller.occupation,
+                    "establishment_id": est.id,
+                    "establishment_kind": est.kind.value,
+                    "product_id": result.product_id,
+                    "dialogue_kind": result.dialogue_kind,
+                    "arm": arm,
+                    "targeted": targeted,
+                    "sim_minute": sim_minute,
+                    "day_of_year": day_of_year,
+                }
+            )
+        except Exception:
+            pass
 
     # Free opening line from the seller — saves one LLM call and grounds the
     # conversation in the right context.
@@ -171,8 +228,7 @@ def run_dialogue(
     buyer_history.append(LLMMessage(role="user", content=greeting))
     opening = DialogueTurn(speaker="seller", text=greeting)
     result.turns.append(opening)
-    if on_turn:
-        on_turn(opening)
+    _emit_turn(opening)
 
     end_reason = "max_turns"
     for _ in range(max_turns):
@@ -181,8 +237,7 @@ def run_dialogue(
         buyer_text = resp.text.strip()
         turn = DialogueTurn(speaker="buyer", text=buyer_text)
         result.turns.append(turn)
-        if on_turn:
-            on_turn(turn)
+        _emit_turn(turn)
         buyer_history.append(LLMMessage(role="assistant", content=buyer_text))
         seller_history.append(LLMMessage(role="user", content=buyer_text))
 
@@ -198,8 +253,7 @@ def run_dialogue(
         seller_text = resp.text.strip()
         turn = DialogueTurn(speaker="seller", text=seller_text)
         result.turns.append(turn)
-        if on_turn:
-            on_turn(turn)
+        _emit_turn(turn)
         seller_history.append(LLMMessage(role="assistant", content=seller_text))
         buyer_history.append(LLMMessage(role="user", content=seller_text))
 
@@ -209,6 +263,24 @@ def run_dialogue(
     if extract_outcome:
         result.outcome = _extract_outcome(result, seller.occupation, active_product)
 
+    if on_event is not None:
+        try:
+            on_event(
+                {
+                    "type": "dialogue_ended",
+                    "dialogue_id": dialogue_id,
+                    "end_reason": end_reason,
+                    "duration_s": result.duration_s,
+                    "outcome": result.outcome,
+                    "dialogue_kind": result.dialogue_kind,
+                    "arm": result.arm,
+                    "targeted": result.targeted,
+                    "product_id": result.product_id,
+                }
+            )
+        except Exception:
+            pass
+
     # Log the whole thing (dialogue + outcome) to the event log.
     if log_to is not None:
         log_to.append(
@@ -216,6 +288,7 @@ def run_dialogue(
             sim_minute=sim_minute,
             day_of_year=day_of_year,
             payload={
+                "dialogue_id": result.dialogue_id,
                 "buyer_id": result.buyer_id,
                 "seller_id": result.seller_id,
                 "establishment_id": result.establishment_id,
