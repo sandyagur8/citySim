@@ -30,6 +30,15 @@ export async function fetchProduct(): Promise<ProductBriefDict | null> {
   return jsonOrNull<ProductBriefDict>(res);
 }
 
+export async function fetchProducts(): Promise<ProductBriefDict[]> {
+  const res = await fetch(`${base}/api/products`);
+  if (!res.ok) {
+    const detail = await res.text().catch(() => res.statusText);
+    throw new Error(`HTTP ${res.status}: ${detail}`);
+  }
+  return (await res.json()) as ProductBriefDict[];
+}
+
 export async function saveProduct(
   brief: ProductBriefDict,
 ): Promise<ProductBriefDict> {
@@ -45,8 +54,9 @@ export async function saveProduct(
   return (await res.json()) as ProductBriefDict;
 }
 
-export async function deleteProduct(): Promise<void> {
-  const res = await fetch(`${base}/api/product`, { method: 'DELETE' });
+export async function deleteProduct(name?: string): Promise<void> {
+  const qp = name ? `?name=${encodeURIComponent(name)}` : '';
+  const res = await fetch(`${base}/api/product${qp}`, { method: 'DELETE' });
   if (!res.ok) {
     throw new Error(`HTTP ${res.status}`);
   }
@@ -71,7 +81,25 @@ export async function fetchAgentByEns(ensName: string): Promise<EnsAgentLookup |
 
 export async function updateAgentPersonaByEns(
   ensName: string,
-  payload: { occupation?: string; card_text?: string },
+  payload: {
+    age?: number;
+    gender?: string;
+    education?: string;
+    income_band?: string;
+    occupation?: string;
+    household_role?: string;
+    household_id?: string;
+    mode?: string;
+    employer_id?: string | null;
+    home_cell?: [number, number];
+    work_cell?: [number, number] | null;
+    card_text?: string;
+    prefs?: Record<string, unknown>;
+    needs?: Record<string, unknown>;
+    wallet_address?: string | null;
+    axl_key?: string | null;
+    ens_status?: string;
+  },
 ): Promise<{ ok: boolean; agent_id: string; ens_name: string | null }> {
   const name = ensName.trim();
   const res = await fetch(`${base}/api/agent/by-ens/${encodeURIComponent(name)}/persona`, {

@@ -46,6 +46,7 @@ export type SimStream = {
   clock: ClockPayload | null;
   smoothed: SmoothedPositions | null;
   product: ProductBriefDict | null;
+  products: ProductBriefDict[];
   stats: LiveStats;
   recentDialogues: DialogueCard[];
   daySummary: DaySummaryDict | null;
@@ -61,6 +62,7 @@ export function useSimStream(url = '/ws'): SimStream {
   const [clock, setClock] = useState<ClockPayload | null>(null);
   const [smoothed, setSmoothed] = useState<SmoothedPositions | null>(null);
   const [product, setProduct] = useState<ProductBriefDict | null>(null);
+  const [products, setProducts] = useState<ProductBriefDict[]>([]);
   const [stats, setStats] = useState<LiveStats>(EMPTY_STATS);
   const [recentDialogues, setRecentDialogues] = useState<DialogueCard[]>([]);
   const [daySummary, setDaySummary] = useState<DaySummaryDict | null>(null);
@@ -136,6 +138,7 @@ export function useSimStream(url = '/ws'): SimStream {
           setWorld(msg.world);
           setClock(msg.clock);
           setProduct(msg.product);
+          setProducts(msg.products ?? (msg.product ? [msg.product] : []));
           setStats(msg.stats ?? EMPTY_STATS);
           setRecentDialogues(msg.recent_dialogues ?? []);
           setDaySummary(msg.last_day_summary);
@@ -235,6 +238,10 @@ export function useSimStream(url = '/ws'): SimStream {
           setPendingSummary(msg.summary);
         } else if (msg.type === 'product_updated') {
           setProduct(msg.product);
+          setProducts(msg.product ? [msg.product] : []);
+        } else if (msg.type === 'products_updated') {
+          setProducts(msg.products ?? []);
+          setProduct((msg.products && msg.products.length > 0) ? msg.products[0] : null);
         }
       };
     }
@@ -290,6 +297,7 @@ export function useSimStream(url = '/ws'): SimStream {
     clock,
     smoothed,
     product,
+    products,
     stats,
     recentDialogues,
     daySummary,

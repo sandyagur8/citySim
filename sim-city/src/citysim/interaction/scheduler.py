@@ -44,7 +44,7 @@ from citysim.interaction.runner import (
     run_dialogue,
 )
 from citysim.interaction.transport import AxlTransport, LocalTransport
-from citysim.product import ProductBrief, load_product, matches_target
+from citysim.product import ProductBrief, load_product, load_products, matches_target
 from citysim.server.sim import record_dialogue_error
 from citysim.store import EventLog
 from citysim.world.establishments import Establishment
@@ -159,7 +159,8 @@ async def dialogue_worker(
         "on",
     }
 
-    brief = load_product()
+    products = load_products()
+    brief = products[0] if products else None
     # Note the file's mtime so we can hot-reload when the REST CRUD endpoints
     # rewrite product.json. Avoids restarting the server during a demo.
     from citysim.product import default_product_path
@@ -206,23 +207,23 @@ async def dialogue_worker(
                 if product_path.exists():
                     mtime = product_path.stat().st_mtime
                     if mtime != last_mtime:
-                        new_brief = load_product()
-                        if (new_brief is None) != (brief is None) or (
-                            new_brief is not None
-                            and brief is not None
-                            and new_brief.to_dict() != brief.to_dict()
-                        ):
-                            brief = new_brief
+                        new_products = load_products()
+                        old_sig = [b.to_dict() for b in products]
+                        new_sig = [b.to_dict() for b in new_products]
+                        if old_sig != new_sig:
+                            products = new_products
+                            brief = products[0] if products else None
                             log.info(
-                                "dialogue_worker: reloaded product brief (%s)",
-                                brief.name if brief else "cleared",
+                                "dialogue_worker: reloaded products (count=%d)",
+                                len(products),
                             )
                         last_mtime = mtime
                 elif last_mtime > 0.0:
                     # File deleted -> drop into generic mode
                     if brief is not None:
-                        log.info("dialogue_worker: product brief cleared from disk")
+                        log.info("dialogue_worker: products cleared from disk")
                     brief = None
+                    products = []
                     last_mtime = 0.0
             except Exception:
                 log.debug("dialogue_worker: brief reload check failed", exc_info=True)
@@ -230,6 +231,7 @@ async def dialogue_worker(
             iteration += 1
 
             # ---------- Decide arm + store + buyer ----------
+            brief = rng.choice(products) if products else None
             if brief is not None:
                 # Decide whether THIS dialogue is product or baseline-generic.
                 run_baseline = rng.random() < baseline_ratio

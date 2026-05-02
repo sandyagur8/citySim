@@ -19,6 +19,7 @@ import type { ProductBriefDict } from '../lib/types';
 
 type Props = {
   initial: ProductBriefDict | null;
+  products: ProductBriefDict[];
   onClose: () => void;
   onSaved: (b: ProductBriefDict) => void;
   onSetConcurrentAgents: (n: number) => void;
@@ -49,6 +50,7 @@ function Toggle({
 
 export function ProductSetup({
   initial,
+  products,
   onClose,
   onSaved,
   onSetConcurrentAgents,
@@ -64,13 +66,21 @@ export function ProductSetup({
   const [error, setError] = useState<string | null>(null);
   const [concurrentAgents, setConcurrentAgents] = useState<number>(1);
   const [axlNodeCount, setAxlNodeCount] = useState<number>(2);
+  const [selectedName, setSelectedName] = useState<string>(initial?.name ?? '');
 
   useEffect(() => {
     if (initial) {
       setBrief(initial);
       setKeyFeaturesText((initial.key_features ?? []).join(', '));
+      setSelectedName(initial.name);
     }
   }, [initial]);
+
+  useEffect(() => {
+    if (!selectedName && products.length) {
+      setSelectedName(products[0].name);
+    }
+  }, [products, selectedName]);
 
   const update = <K extends keyof ProductBriefDict>(
     k: K,
@@ -125,7 +135,6 @@ export function ProductSetup({
       onSetConcurrentAgents(Math.max(1, Math.floor(concurrentAgents || 1)));
       onSetAxlNodeCount(Math.max(1, Math.floor(axlNodeCount || 1)));
       onSaved(saved);
-      onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -134,17 +143,45 @@ export function ProductSetup({
   };
 
   const onClear = async () => {
-    if (!confirm('Clear the current product brief? The simulator will go back to generic mode.'))
+    const target = selectedName || brief.name;
+    if (!target) return;
+    if (!confirm(`Remove product '${target}'?`))
       return;
     setSubmitting(true);
     try {
-      await deleteProduct();
+      await deleteProduct(target);
+      const next = products.find((p) => p.name !== target) ?? null;
+      if (next) {
+        setBrief(next);
+        setKeyFeaturesText((next.key_features ?? []).join(', '));
+        setSelectedName(next.name);
+      } else {
+        const empty = emptyProductBrief();
+        setBrief(empty);
+        setKeyFeaturesText('');
+        setSelectedName('');
+      }
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const onAddNew = () => {
+    const empty = emptyProductBrief();
+    setBrief(empty);
+    setKeyFeaturesText('');
+    setSelectedName('');
+  };
+
+  const onSelectProduct = (name: string) => {
+    setSelectedName(name);
+    const p = products.find((x) => x.name === name);
+    if (!p) return;
+    setBrief(p);
+    setKeyFeaturesText((p.key_features ?? []).join(', '));
   };
 
   return (
@@ -170,6 +207,40 @@ export function ProductSetup({
         </div>
 
         <form onSubmit={onSubmit} className="px-6 py-5 space-y-5">
+          <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto_auto] gap-2 items-end">
+            <label className="block">
+              <span className="text-xs uppercase tracking-wider text-neutral-400">
+                Product set
+              </span>
+              <select
+                className="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
+                value={selectedName}
+                onChange={(e) => onSelectProduct(e.target.value)}
+              >
+                <option value="">New product...</option>
+                {products.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={onAddNew}
+              className="h-10 px-3 rounded bg-neutral-800 hover:bg-neutral-700 text-sm"
+            >
+              Add New
+            </button>
+            <button
+              type="button"
+              onClick={onClear}
+              className="h-10 px-3 rounded bg-rose-900/50 hover:bg-rose-800 text-sm"
+              disabled={submitting || !selectedName}
+            >
+              Remove
+            </button>
+          </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <label className="block">
               <span className="text-xs uppercase tracking-wider text-neutral-400">

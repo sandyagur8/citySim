@@ -130,21 +130,13 @@ class ProductBrief:
 
 def load_product(path: Path | None = None) -> ProductBrief | None:
     """Return the saved product brief, or None if no file exists."""
-    p = path or default_product_path()
-    if not p.exists():
-        return None
-    raw = json.loads(p.read_text(encoding="utf-8"))
-    return ProductBrief.from_dict(raw)
+    products = load_products(path)
+    return products[0] if products else None
 
 
 def save_product(brief: ProductBrief, path: Path | None = None) -> Path:
     """Atomically write a product brief to disk."""
-    p = path or default_product_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(brief.to_dict(), indent=2), encoding="utf-8")
-    tmp.replace(p)
-    return p
+    return save_products([brief], path)
 
 
 def clear_product(path: Path | None = None) -> bool:
@@ -154,6 +146,30 @@ def clear_product(path: Path | None = None) -> bool:
         p.unlink()
         return True
     return False
+
+
+def load_products(path: Path | None = None) -> list[ProductBrief]:
+    p = path or default_product_path()
+    if not p.exists():
+        return []
+    raw = json.loads(p.read_text(encoding="utf-8"))
+    if isinstance(raw, list):
+        return [ProductBrief.from_dict(x) for x in raw if isinstance(x, dict)]
+    if isinstance(raw, dict):
+        return [ProductBrief.from_dict(raw)]
+    return []
+
+
+def save_products(products: list[ProductBrief], path: Path | None = None) -> Path:
+    p = path or default_product_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps([b.to_dict() for b in products], indent=2),
+        encoding="utf-8",
+    )
+    tmp.replace(p)
+    return p
 
 
 # ---------------------------------------------------------------------------

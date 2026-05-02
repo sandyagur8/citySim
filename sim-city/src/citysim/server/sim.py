@@ -371,9 +371,10 @@ def init_payload(sim: SimState) -> dict[str, Any]:
     """Initial message sent on a new WebSocket connection."""
     # Lazy import to avoid an import cycle at module-load (citysim.product
     # pulls in citysim.world.establishments).
-    from citysim.product import load_product
+    from citysim.product import load_product, load_products
 
     brief = load_product()
+    products = load_products()
     return {
         "type": "init",
         "world": {
@@ -389,6 +390,7 @@ def init_payload(sim: SimState) -> dict[str, Any]:
             "paused": sim.paused,
         },
         "product": brief.to_dict() if brief is not None else None,
+        "products": [b.to_dict() for b in products],
         "stats": sim.stats or _empty_stats(),
         "recent_dialogues": list(sim.recent_dialogues),
         "last_day_summary": sim.last_day_summary,

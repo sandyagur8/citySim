@@ -21,8 +21,10 @@ from .brief import (
     clear_product,
     default_product_path,
     load_product,
+    load_products,
     matches_target,
     save_product,
+    save_products,
 )
 
 __all__ = [
@@ -34,6 +36,8 @@ __all__ = [
     "clear_product",
     "default_product_path",
     "load_product",
+    "load_products",
     "matches_target",
     "save_product",
+    "save_products",
 ]

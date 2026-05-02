@@ -13,8 +13,23 @@ export function EnsLookupPanel({ onClose }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<EnsAgentLookup | null>(null);
   const [editOpen, setEditOpen] = useState(false);
+  const [editAge, setEditAge] = useState(0);
+  const [editGender, setEditGender] = useState('');
+  const [editEducation, setEditEducation] = useState('');
+  const [editIncomeBand, setEditIncomeBand] = useState('');
   const [editOccupation, setEditOccupation] = useState('');
+  const [editHouseholdRole, setEditHouseholdRole] = useState('');
+  const [editHouseholdId, setEditHouseholdId] = useState('');
+  const [editMode, setEditMode] = useState('');
+  const [editEmployerId, setEditEmployerId] = useState('');
+  const [editHomeCell, setEditHomeCell] = useState('');
+  const [editWorkCell, setEditWorkCell] = useState('');
   const [editCardText, setEditCardText] = useState('');
+  const [editPrefsJson, setEditPrefsJson] = useState('{}');
+  const [editNeedsJson, setEditNeedsJson] = useState('{}');
+  const [editWalletAddress, setEditWalletAddress] = useState('');
+  const [editAxlKey, setEditAxlKey] = useState('');
+  const [editEnsStatus, setEditEnsStatus] = useState('');
   const [saving, setSaving] = useState(false);
 
   async function onSearch() {
@@ -27,8 +42,23 @@ export function EnsLookupPanel({ onClose }: Props) {
         setError('No agent found for this ENS.');
       } else {
         setResult(r);
+        setEditAge(r.demographics.age);
+        setEditGender(r.demographics.gender);
+        setEditEducation(r.demographics.education);
+        setEditIncomeBand(r.demographics.income_band);
         setEditOccupation(r.demographics.occupation);
+        setEditHouseholdRole(r.demographics.household_role);
+        setEditHouseholdId(r.household_id);
+        setEditMode(r.mode);
+        setEditEmployerId(r.employer_id || '');
+        setEditHomeCell(`${r.home_cell[0]},${r.home_cell[1]}`);
+        setEditWorkCell(r.work_cell ? `${r.work_cell[0]},${r.work_cell[1]}` : '');
         setEditCardText(r.card_text);
+        setEditPrefsJson(JSON.stringify(r.prefs, null, 2));
+        setEditNeedsJson(JSON.stringify(r.needs, null, 2));
+        setEditWalletAddress(r.wallet_address || '');
+        setEditAxlKey(r.axl_key || '');
+        setEditEnsStatus(r.ens_status || '');
       }
     } catch (e) {
       setResult(null);
@@ -43,15 +73,60 @@ export function EnsLookupPanel({ onClose }: Props) {
     setSaving(true);
     setError(null);
     try {
+      const parseCell = (raw: string): [number, number] | null => {
+        const t = raw.trim();
+        if (!t) return null;
+        const parts = t.split(',').map((x) => Number(x.trim()));
+        if (parts.length !== 2 || Number.isNaN(parts[0]) || Number.isNaN(parts[1])) {
+          throw new Error('Cell format must be \"x,y\"');
+        }
+        return [parts[0], parts[1]];
+      };
+      const homeCell = parseCell(editHomeCell);
+      if (!homeCell) throw new Error('home_cell required');
+      const workCell = parseCell(editWorkCell);
+      const prefs = JSON.parse(editPrefsJson);
+      const needs = JSON.parse(editNeedsJson);
+
       await updateAgentPersonaByEns(result.ens_name || ens, {
+        age: editAge,
+        gender: editGender,
+        education: editEducation,
+        income_band: editIncomeBand,
         occupation: editOccupation,
+        household_role: editHouseholdRole,
+        household_id: editHouseholdId,
+        mode: editMode,
+        employer_id: editEmployerId || null,
+        home_cell: homeCell,
+        work_cell: workCell,
         card_text: editCardText,
+        prefs,
+        needs,
+        wallet_address: editWalletAddress || null,
+        axl_key: editAxlKey || null,
+        ens_status: editEnsStatus,
       });
       const refreshed = await fetchAgentByEns(result.ens_name || ens);
       if (refreshed) {
         setResult(refreshed);
+        setEditAge(refreshed.demographics.age);
+        setEditGender(refreshed.demographics.gender);
+        setEditEducation(refreshed.demographics.education);
+        setEditIncomeBand(refreshed.demographics.income_band);
         setEditOccupation(refreshed.demographics.occupation);
+        setEditHouseholdRole(refreshed.demographics.household_role);
+        setEditHouseholdId(refreshed.household_id);
+        setEditMode(refreshed.mode);
+        setEditEmployerId(refreshed.employer_id || '');
+        setEditHomeCell(`${refreshed.home_cell[0]},${refreshed.home_cell[1]}`);
+        setEditWorkCell(refreshed.work_cell ? `${refreshed.work_cell[0]},${refreshed.work_cell[1]}` : '');
         setEditCardText(refreshed.card_text);
+        setEditPrefsJson(JSON.stringify(refreshed.prefs, null, 2));
+        setEditNeedsJson(JSON.stringify(refreshed.needs, null, 2));
+        setEditWalletAddress(refreshed.wallet_address || '');
+        setEditAxlKey(refreshed.axl_key || '');
+        setEditEnsStatus(refreshed.ens_status || '');
       }
       setEditOpen(false);
     } catch (e) {
@@ -108,6 +183,11 @@ export function EnsLookupPanel({ onClose }: Props) {
           <Row k="ENS status" v={result.ens_status} />
           <Row k="Wallet" v={result.wallet_address ?? '—'} mono />
           <Row k="AXL key" v={result.axl_key ?? '—'} mono />
+          <Row k="Mode" v={result.mode} />
+          <Row k="Employer ID" v={result.employer_id ?? '—'} mono />
+          <Row k="Household ID" v={result.household_id} mono />
+          <Row k="Home Cell" v={`${result.home_cell[0]},${result.home_cell[1]}`} mono />
+          <Row k="Work Cell" v={result.work_cell ? `${result.work_cell[0]},${result.work_cell[1]}` : '—'} mono />
           <Row
             k="Profile"
             v={`${result.demographics.age}, ${result.demographics.gender}, ${result.demographics.occupation}`}
@@ -126,13 +206,21 @@ export function EnsLookupPanel({ onClose }: Props) {
 
           {editOpen && (
             <div className="mt-2 p-2 border border-neutral-700 rounded bg-neutral-950/60 space-y-2">
-              <div>
-                <div className="text-[11px] text-neutral-400 mb-1">Occupation</div>
-                <input
-                  value={editOccupation}
-                  onChange={(e) => setEditOccupation(e.target.value)}
-                  className="w-full rounded bg-neutral-800 border border-neutral-700 px-2 py-1.5 text-xs outline-none focus:border-amber-400"
-                />
+              <div className="grid grid-cols-2 gap-2">
+                <FieldInput label="Age" value={String(editAge)} onChange={(v) => setEditAge(parseInt(v || '0', 10) || 0)} />
+                <FieldInput label="Gender" value={editGender} onChange={setEditGender} />
+                <FieldInput label="Education" value={editEducation} onChange={setEditEducation} />
+                <FieldInput label="Income Band" value={editIncomeBand} onChange={setEditIncomeBand} />
+                <FieldInput label="Occupation" value={editOccupation} onChange={setEditOccupation} />
+                <FieldInput label="Household Role" value={editHouseholdRole} onChange={setEditHouseholdRole} />
+                <FieldInput label="Household ID" value={editHouseholdId} onChange={setEditHouseholdId} />
+                <FieldInput label="Mode" value={editMode} onChange={setEditMode} />
+                <FieldInput label="Employer ID" value={editEmployerId} onChange={setEditEmployerId} />
+                <FieldInput label="Home Cell (x,y)" value={editHomeCell} onChange={setEditHomeCell} />
+                <FieldInput label="Work Cell (x,y)" value={editWorkCell} onChange={setEditWorkCell} />
+                <FieldInput label="ENS Status" value={editEnsStatus} onChange={setEditEnsStatus} />
+                <FieldInput label="Wallet Address" value={editWalletAddress} onChange={setEditWalletAddress} />
+                <FieldInput label="AXL Key" value={editAxlKey} onChange={setEditAxlKey} />
               </div>
               <div>
                 <div className="text-[11px] text-neutral-400 mb-1">Persona Card</div>
@@ -141,6 +229,24 @@ export function EnsLookupPanel({ onClose }: Props) {
                   value={editCardText}
                   onChange={(e) => setEditCardText(e.target.value)}
                   className="w-full rounded bg-neutral-800 border border-neutral-700 px-2 py-1.5 text-xs outline-none focus:border-amber-400"
+                />
+              </div>
+              <div>
+                <div className="text-[11px] text-neutral-400 mb-1">Prefs (JSON)</div>
+                <textarea
+                  rows={5}
+                  value={editPrefsJson}
+                  onChange={(e) => setEditPrefsJson(e.target.value)}
+                  className="w-full rounded bg-neutral-800 border border-neutral-700 px-2 py-1.5 text-xs font-mono outline-none focus:border-amber-400"
+                />
+              </div>
+              <div>
+                <div className="text-[11px] text-neutral-400 mb-1">Needs (JSON)</div>
+                <textarea
+                  rows={5}
+                  value={editNeedsJson}
+                  onChange={(e) => setEditNeedsJson(e.target.value)}
+                  className="w-full rounded bg-neutral-800 border border-neutral-700 px-2 py-1.5 text-xs font-mono outline-none focus:border-amber-400"
                 />
               </div>
               <button
@@ -156,6 +262,27 @@ export function EnsLookupPanel({ onClose }: Props) {
         </div>
       )}
     </section>
+  );
+}
+
+function FieldInput({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  return (
+    <label className="block">
+      <div className="text-[11px] text-neutral-400 mb-1">{label}</div>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded bg-neutral-800 border border-neutral-700 px-2 py-1.5 text-xs outline-none focus:border-amber-400"
+      />
+    </label>
   );
 }
 

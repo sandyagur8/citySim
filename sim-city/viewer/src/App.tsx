@@ -27,6 +27,7 @@ export default function App() {
     clock,
     smoothed,
     product,
+    products,
     stats,
     recentDialogues,
     pendingSummary,
@@ -130,6 +131,7 @@ export default function App() {
       {productSetupOpen && (
         <ProductSetup
           initial={product}
+          products={products}
           onSetConcurrentAgents={(n) => send({ type: 'set_dialogue_workers', value: n })}
           onSetAxlNodeCount={(n) => send({ type: 'set_axl_node_count', value: n })}
           onClose={() => setProductSetupOpen(false)}

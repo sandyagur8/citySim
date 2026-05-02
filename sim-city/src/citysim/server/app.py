@@ -29,11 +29,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from citysim.env import load_env_file
 from citysim.interaction import dialogue_worker
+from citysim.world.agents import TransportMode
 from citysim.product import (
     ProductBrief,
     clear_product,
     load_product,
+    load_products,
     save_product,
+    save_products,
 )
 from citysim.reporting import format_summary, summarize_day
 from citysim.server.sim import (
@@ -350,6 +353,9 @@ def create_app(
             "ens_status": row.ens_status,
             "wallet_address": row.wallet_address,
             "axl_key": row.axl_key,
+            "household_id": row.household_id,
+            "employer_id": row.employer_id,
+            "mode": row.mode,
             "demographics": {
                 "age": row.age,
                 "gender": row.gender,
@@ -393,17 +399,87 @@ def create_app(
             raise HTTPException(status_code=404, detail=f"No agent found for ENS: {query}")
 
         changed = False
+        if "age" in payload:
+            age = int(payload.get("age"))
+            if age < 0 or age > 120:
+                raise HTTPException(status_code=400, detail="age out of range")
+            row.age = age
+            changed = True
+        if "gender" in payload:
+            row.gender = str(payload.get("gender") or "").strip() or row.gender
+            changed = True
+        if "education" in payload:
+            row.education = str(payload.get("education") or "").strip() or row.education
+            changed = True
+        if "income_band" in payload:
+            row.income_band = str(payload.get("income_band") or "").strip() or row.income_band
+            changed = True
         if "occupation" in payload:
             occ = str(payload.get("occupation") or "").strip()
             if not occ:
                 raise HTTPException(status_code=400, detail="occupation cannot be empty")
             row.occupation = occ
             changed = True
+        if "household_role" in payload:
+            row.household_role = str(payload.get("household_role") or "").strip() or row.household_role
+            changed = True
+        if "household_id" in payload:
+            row.household_id = str(payload.get("household_id") or "").strip() or row.household_id
+            changed = True
+        if "mode" in payload:
+            mode = str(payload.get("mode") or "").strip()
+            try:
+                TransportMode(mode)
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(status_code=400, detail=f"invalid mode: {mode}") from e
+            row.mode = mode
+            changed = True
+        if "employer_id" in payload:
+            eid = payload.get("employer_id")
+            row.employer_id = str(eid).strip() if eid is not None and str(eid).strip() else None
+            changed = True
+        if "home_cell" in payload:
+            hc = payload.get("home_cell")
+            if not isinstance(hc, list) or len(hc) != 2:
+                raise HTTPException(status_code=400, detail="home_cell must be [x,y]")
+            row.home_x, row.home_y = int(hc[0]), int(hc[1])
+            changed = True
+        if "work_cell" in payload:
+            wc = payload.get("work_cell")
+            if wc is None:
+                row.work_x = None
+                row.work_y = None
+            else:
+                if not isinstance(wc, list) or len(wc) != 2:
+                    raise HTTPException(status_code=400, detail="work_cell must be null or [x,y]")
+                row.work_x, row.work_y = int(wc[0]), int(wc[1])
+            changed = True
         if "card_text" in payload:
             card = str(payload.get("card_text") or "").strip()
             if not card:
                 raise HTTPException(status_code=400, detail="card_text cannot be empty")
             row.card_text = card
+            changed = True
+        if "prefs" in payload:
+            prefs = payload.get("prefs")
+            if not isinstance(prefs, dict):
+                raise HTTPException(status_code=400, detail="prefs must be JSON object")
+            row.prefs = prefs
+            changed = True
+        if "needs" in payload:
+            needs = payload.get("needs")
+            if not isinstance(needs, dict):
+                raise HTTPException(status_code=400, detail="needs must be JSON object")
+            row.needs = needs
+            changed = True
+        if "wallet_address" in payload:
+            row.wallet_address = str(payload.get("wallet_address") or "").strip() or None
+            changed = True
+        if "axl_key" in payload:
+            row.axl_key = str(payload.get("axl_key") or "").strip() or None
+            changed = True
+        if "ens_status" in payload:
+            row.ens_status = str(payload.get("ens_status") or "").strip() or row.ens_status
             changed = True
 
         if not changed:
@@ -413,11 +489,41 @@ def create_app(
 
         persona = sim.persona_by_id.get(row.agent_id)
         if persona is not None:
+            persona.age = row.age
+            persona.gender = row.gender
+            persona.education = row.education
+            persona.income_band = row.income_band
             persona.occupation = row.occupation
+            persona.household_id = row.household_id
+            persona.household_role = row.household_role
+            persona.mode = TransportMode(row.mode)
+            persona.employer_id = row.employer_id
+            persona.home_cell = (row.home_x, row.home_y)
+            persona.work_cell = (
+                (row.work_x, row.work_y) if row.work_x is not None and row.work_y is not None else None
+            )
+            persona.prefs = dict(row.prefs)
+            persona.needs = dict(row.needs)
             persona.card_text = row.card_text
+            persona.wallet_address = row.wallet_address
+            persona.axl_key = row.axl_key
+            persona.ens_status = row.ens_status
         for agent in sim.agents:
             if agent.id == row.agent_id:
+                agent.age = row.age
                 agent.occupation = row.occupation
+                agent.home_cell = (row.home_x, row.home_y)
+                agent.work_cell = (
+                    (row.work_x, row.work_y) if row.work_x is not None and row.work_y is not None else None
+                )
+                agent.mode = TransportMode(row.mode)
+                agent.employer_id = row.employer_id
+                agent.extra = {
+                    **agent.extra,
+                    "gender": row.gender,
+                    "income_band": row.income_band,
+                    "household_role": row.household_role,
+                }
                 break
 
         return {"ok": True, "agent_id": row.agent_id, "ens_name": row.ens_name}
@@ -431,6 +537,10 @@ def create_app(
             raise HTTPException(status_code=404, detail="No product brief loaded")
         return brief.to_dict()
 
+    @app.get("/api/products")
+    async def get_products() -> list[dict[str, Any]]:
+        return [b.to_dict() for b in load_products()]
+
     @app.post("/api/product")
     async def post_product(payload: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -442,19 +552,39 @@ def create_app(
             brief.category_kind()
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
-        save_product(brief)
+        products = load_products()
+        replaced = False
+        for i, b in enumerate(products):
+            if b.name == brief.name:
+                products[i] = brief
+                replaced = True
+                break
+        if not replaced:
+            products.append(brief)
+        save_products(products)
         # Tell every connected viewer the product changed.
         sim = sim_holder.get("sim")
         if sim is not None:
-            await broadcast(sim, {"type": "product_updated", "product": brief.to_dict()})
+            await broadcast(sim, {"type": "products_updated", "products": [b.to_dict() for b in products]})
         return brief.to_dict()
 
     @app.delete("/api/product")
-    async def delete_product() -> dict[str, bool]:
-        removed = clear_product()
+    async def delete_product(name: str | None = None) -> dict[str, bool]:
+        removed = False
+        if name:
+            products = load_products()
+            n0 = len(products)
+            products = [b for b in products if b.name != name]
+            removed = len(products) != n0
+            if products:
+                save_products(products)
+            else:
+                clear_product()
+        else:
+            removed = clear_product()
         sim = sim_holder.get("sim")
         if sim is not None:
-            await broadcast(sim, {"type": "product_updated", "product": None})
+            await broadcast(sim, {"type": "products_updated", "products": [b.to_dict() for b in load_products()]})
         return {"removed": removed}
 
     # ---------- Day summaries ----------

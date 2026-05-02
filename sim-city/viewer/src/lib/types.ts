@@ -82,6 +82,9 @@ export type EnsAgentLookup = {
   ens_status: string;
   wallet_address: string | null;
   axl_key: string | null;
+  household_id: string;
+  employer_id: string | null;
+  mode: string;
   demographics: {
     age: number;
     gender: string;
@@ -190,6 +193,7 @@ export type InitMessage = {
   world: WorldPayload;
   clock: ClockPayload;
   product: ProductBriefDict | null;
+  products?: ProductBriefDict[];
   stats: LiveStats;
   recent_dialogues: DialogueCard[];
   last_day_summary: DaySummaryDict | null;
@@ -255,6 +259,11 @@ export type ProductUpdatedMessage = {
   product: ProductBriefDict | null;
 };
 
+export type ProductsUpdatedMessage = {
+  type: 'products_updated';
+  products: ProductBriefDict[];
+};
+
 export type ServerMessage =
   | InitMessage
   | TickMessage
@@ -262,7 +271,8 @@ export type ServerMessage =
   | DialogueTurnMessage
   | DialogueEndedMessage
   | DaySummaryMessage
-  | ProductUpdatedMessage;
+  | ProductUpdatedMessage
+  | ProductsUpdatedMessage;
 
 export type ControlMessage =
   | { type: 'set_speed'; value: number }
