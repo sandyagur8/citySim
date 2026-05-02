@@ -62,9 +62,17 @@ async function main() {
   });
 
   const results: MintResult[] = [];
-  if (jobs.length) {
+  const skipParentCheck = process.env.ENS_SKIP_PARENT_CHECK === '1';
+  if (jobs.length && !skipParentCheck) {
     console.error(`[mint] checking parent ownership for ${jobs[0].ens_name}`);
-    await ensureParentOwnership(jobs[0].ens_name, publicClient, walletClient, account.address);
+    await withRetry(
+      () => ensureParentOwnership(jobs[0].ens_name, publicClient, walletClient, account.address),
+      5,
+      1200,
+      'parent-ownership',
+    );
+  } else if (jobs.length && skipParentCheck) {
+    console.error('[mint] skipping parent ownership check (ENS_SKIP_PARENT_CHECK=1)');
   }
   console.error(`[mint] processing ${jobs.length} subnames`);
   const states: JobState[] = jobs.map((job) => ({ job }));
@@ -169,6 +177,27 @@ async function main() {
   } else {
     process.stdout.write(json);
   }
+}
+
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  attempts: number,
+  baseDelayMs: number,
+  label: string,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i >= attempts) break;
+      const delay = baseDelayMs * i;
+      console.error(`[mint] ${label} failed attempt ${i}/${attempts}: ${String(e).slice(0, 220)}`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 main().catch((e) => {

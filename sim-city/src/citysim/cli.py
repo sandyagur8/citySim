@@ -839,3 +839,43 @@ def bootstrap_ens(
 
     typer.echo("[6/6] Sync ENS status from chain...")
     sync_ens_status(limit=max(1, n_agents * 2), concurrency=max(10, batch_size))
+
+
+@app.command(name="bootstrap-all")
+def bootstrap_all(
+    n_agents: int = 100,
+    grid_size: int = 80,
+    seed: int = 42,
+    max_establishments_per_kind: int = 5,
+    batch_size: int = 20,
+    concurrency: int = 20,
+    force_regenerate: bool = True,
+) -> None:
+    """Master bootstrap: personas + establishments ENS + AXL keys + sync."""
+    script = Path(__file__).resolve().parents[2] / "scripts" / "bootstrap_all_entities.py"
+    if not script.exists():
+        typer.echo(f"Bootstrap script missing: {script}")
+        raise typer.Exit(1)
+
+    cmd = [
+        "python",
+        str(script),
+        "--n-agents",
+        str(n_agents),
+        "--grid-size",
+        str(grid_size),
+        "--seed",
+        str(seed),
+        "--max-establishments-per-kind",
+        str(max_establishments_per_kind),
+        "--batch-size",
+        str(batch_size),
+        "--concurrency",
+        str(concurrency),
+    ]
+    if not force_regenerate:
+        cmd.append("--no-force-regenerate")
+
+    proc = subprocess.run(cmd, check=False, text=True)
+    if proc.returncode != 0:
+        raise typer.Exit(proc.returncode)
