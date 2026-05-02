@@ -15,7 +15,7 @@ What Sim-city does **not** own (and what the partner's web3 stack contributes):
 - HD-derived wallets and on-chain settlement.
 - AXL transport on Gensyn for inter-agent intentions/messages.
 
-The integration seams are documented in [§9 Web3 integration plan](#9-web3-integration-plan) below — every place the web3 layer plugs in is called out with a file path.
+The integration seams are documented in [§10 Web3 integration plan](#10-web3-integration-plan) below — every place the web3 layer plugs in is called out with a file path.
 
 The full design (1M-scale architecture, validation strategy, cost reality, etc.) is in [`docs/design.md`](docs/design.md).
 
@@ -231,28 +231,179 @@ Useful when something feels off — confirms the Ollama daemon is reachable and 
 
 ## 6. Running the full simulation
 
-The current build runs the world in real-time inside `citysim serve` (the FastAPI app), with the viewer attached for visualisation. As of this README, dialogues are triggered manually via `citysim run-dialogue` — the **scheduled-dialogues tick loop is the next thing to ship** (where the simulator picks N dialogues per simulated hour based on agent intentions and runs them in the background).
+`citysim serve` runs the world in real-time inside the FastAPI app and attaches the viewer for visualisation. A background **dialogue worker** is on by default — it continuously picks a buyer / shoppable-establishment / employee triple from the live world and runs a buyer-seller dialogue through the local LLM, appending the structured outcome to the JSONL event log. At day rollover (every simulated 24h) the simulator prints a per-day activity summary to stdout.
 
-For now:
+The simulator runs in two modes:
+
+- **Generic city sim** (no product brief loaded) — random buyer, random shoppable establishment, generic shop chatter.
+- **Product test mode** — once you run `citysim init-product`, the worker biases shop conversations toward selling that specific product, captures intrinsic motivators / winning phrases / objections, and produces product-aware summaries with A/B buyer sampling. See [§7 Product testing workflow](#7-product-testing-workflow) for the full loop.
 
 ```bash
-# terminal 1 — simulator + viewer backend
+# terminal 1 — simulator + viewer backend (auto-dialogue on)
 citysim serve --n-agents 10000 --seed 42
 
 # terminal 2 — viewer
 cd viewer && pnpm dev
-
-# terminal 3 — kick off dialogues (loop manually for now)
-for i in $(seq 1 50); do
-  citysim run-dialogue --no-extract
-done
 ```
 
-That fills `~/.citysim/events/events-day0000.jsonl` with 50 dialogue records.
+That's it — leave the simulator running and dialogues will accumulate in `~/.citysim/events/events-day{NNNN}.jsonl`. At each day rollover you'll see a summary printed in terminal 1.
 
-## 7. Inspecting state
+Re-print any earlier day's summary at any time with:
 
-### 7.1 Persona DB (SQLite)
+```bash
+citysim summary 120
+```
+
+### 6.1 Tuning the dialogue worker
+
+Three env vars and one CLI flag control the cadence:
+
+| Var / flag                    | Default | Effect                                                              |
+|-------------------------------|---------|---------------------------------------------------------------------|
+| `CITYSIM_DIALOGUE_PAUSE_S`    | 5.0     | Real-second sleep between dialogues                                 |
+| `CITYSIM_DIALOGUE_MAX_TURNS`  | 6       | Hard cap on turn count per dialogue                                 |
+| `CITYSIM_BASELINE_RATIO`      | 0.25    | Fraction of dialogues that hit non-product shops (control baseline) |
+| `--no-auto-dialogue`          | off     | Disable the worker entirely (run manual dialogues only)             |
+
+The actual cadence is dominated by how long the local model takes to generate each turn — typically 3-10 seconds for a 6-turn dialogue on an 8B-class model. At default settings expect dozens of dialogues per simulated day at 60x speed; fewer at higher sim speeds (the LLM, not the clock, becomes the bottleneck).
+
+You can still trigger ad-hoc dialogues alongside the auto-worker:
+
+```bash
+citysim run-dialogue --buyer-id a000042 --store-id e0007
+```
+
+## 7. Product testing workflow
+
+The product-test loop is the headline use case: define a product, run the simulator, read the daily summary, iterate.
+
+### 7.1 Define the product
+
+```bash
+citysim init-product
+```
+
+Walks you through 8 prompts and saves `~/.citysim/product.json`:
+
+- **Name** — e.g. "OatLatte+"
+- **Category** — which establishment kind sells it (`coffee_shop`, `supermarket`, `restaurant`, `pub`, `hardware`, `pharmacy`, `clothing`, `bank`)
+- **Price** — numeric, in your chosen currency
+- **One-sentence pitch** — flows verbatim into the seller's prompt
+- **Detailed description** — the full elevator pitch, paste a paragraph
+- **Target audience** — free-text persona, e.g. "urban professionals 25-40 who care about sustainability"
+- **Structured target filter** — age bands + income bands (+ optional occupation regex), used for A/B sampling
+- **Key features** — comma-separated list (also flows into the seller prompt)
+- **Positioning** — `premium` / `value` / `niche` / `mainstream`
+
+Inspect it:
+
+```bash
+citysim show-product
+```
+
+Reset:
+
+```bash
+citysim clear-product
+```
+
+### 7.2 Run the simulator
+
+```bash
+citysim serve --n-agents 10000 --seed 42
+```
+
+The dialogue worker detects the product brief on startup (it logs `dialogue_worker: PRODUCT mode - 'OatLatte+' at coffee_shop, $5.50. Target: ages=['18-29','30-44'], income=['middle','upper_middle']`).
+
+Each iteration it:
+
+1. Decides whether this dialogue is **product** (∼75%) or **baseline-generic** (∼25%, controlled by `CITYSIM_BASELINE_RATIO`).
+2. For product dialogues: alternates between **random** sampling (uniform across all 10k personas) and **targeted** sampling (only personas matching the brief's age/income/occupation filter).
+3. Picks an establishment matching `product.category` (or any non-matching shoppable for baseline).
+4. Runs the dialogue with a seller-prompt that includes the full product brief.
+5. Calls the audit-tier extractor with the **product schema** — pulling `purchased`, `units`, `price_paid`, `decisive_factor`, `intrinsic_motivator`, `seller_winning_phrase` (verbatim quote), `objections_raised`, `price_sensitivity`, `target_fit`.
+
+### 7.3 Read the daily summary
+
+At every day rollover (every simulated 24h), the simulator prints a product-aware summary:
+
+```
+======================================================================
+Day  120  -  'OatLatte+' product test
+======================================================================
+PRODUCT TEST
+----------------------------------------------------------------------
+Units sold              : 39 / 84 product interactions
+Conversion (product)    : 46.4%
+Revenue                 : 214.50
+Avg price paid          : 5.50
+
+A/B sampling (random vs targeted buyers):
+  random      n=42   buy_rate= 33.3%
+  targeted    n=42   buy_rate= 59.5%
+
+Top intrinsic motivators (in conversions):
+  health                    14
+  novelty                   10
+  social status              8
+  identity                   5
+  saving money               2
+
+Top seller phrases that converted:
+  (7x)  "It's locally sourced and the oats are climate-positive."
+  (5x)  "We have a loyalty card — your fifth one's on us."
+  (4x)  "Most people who try it switch from regular lattes."
+
+Top objections (in non-conversions):
+  too expensive             18
+  not needed                11
+  prefer competitor          6
+
+Buyer demographics by age band:
+  18-29       n=22   buy_rate= 59.1%
+  30-44       n=31   buy_rate= 51.6%
+  45-59       n=20   buy_rate= 35.0%
+  60+         n=11   buy_rate= 18.2%
+
+Most relevant personas (top 10):
+  *[BUY] a004821  35F designer (middle)            -> health
+  *[BUY] a009134  28M software engineer (upper_middle)  -> identity
+   [BUY] a001247  44F nurse (middle)               -> convenience
+  *[no ] a006781  31M teacher (low)                -> none
+  ...
+  (* = matched target audience filter)
+----------------------------------------------------------------------
+ALL ACTIVITY (product + baseline)
+----------------------------------------------------------------------
+Dialogues run        : 112
+Purchases committed  : 51
+Conversion rate      : 45.5%
+Avg price paid       : 7.20
+Total spend          : 367.20
+...
+======================================================================
+```
+
+The **A/B block** is the headline number for product validation: how does conversion among targeted buyers compare to the population baseline? A big gap means your target audience hypothesis is right; a small gap means the product appeals broadly (or your targeting is too narrow).
+
+The **winning phrases** section is gold for marketing copy — those are the exact lines that converted simulated customers; they translate directly into ad copy and seller-training material.
+
+The **top objections** section is your roadmap for product/positioning iteration.
+
+### 7.4 Iterate
+
+```bash
+citysim clear-product
+citysim init-product   # try a lower price, different positioning, broader target
+citysim serve          # re-run for another sim day
+citysim summary 121    # compare to day 120
+```
+
+Days are independent — each summary file at `~/.citysim/events/events-day{NNNN}.jsonl` is the raw record, and `citysim summary <day>` recomputes the report at any time. Re-running the simulator with the same seed reproduces the same population.
+
+## 8. Inspecting state
+
+### 8.1 Persona DB (SQLite)
 
 ```bash
 sqlite3 ~/.citysim/citysim.db
@@ -263,7 +414,7 @@ sqlite> SELECT income_band, AVG(age) FROM personas GROUP BY income_band;
 
 Every persona row has indexed columns for `household_id`, `employer_id`, `occupation`, `income_band` — segment queries are cheap.
 
-### 7.2 Event log (JSONL → DuckDB)
+### 8.2 Event log (JSONL → DuckDB)
 
 ```bash
 duckdb
@@ -279,7 +430,7 @@ D SELECT
 
 This is the schema the protocol's indexer should consume. Anything you want exported on-chain (purchase receipts, signed messages, settlement amounts) gets pulled from this log.
 
-## 8. Repo layout
+## 9. Repo layout
 
 ```
 sim-city/
@@ -309,11 +460,11 @@ sim-city/
 └── pyproject.toml
 ```
 
-## 9. Web3 integration plan
+## 10. Web3 integration plan
 
 This is the section to read if you own the AXL/ENS/wallet stack. Sim-city's job ends at "produce a structured intention/outcome stream"; your job is to make those intentions real on-chain. Four concrete seams:
 
-### 9.1 ENS subdomain per agent
+### 10.1 ENS subdomain per agent
 
 Each persona gets a deterministic ENS subdomain, e.g. `a000042.simcity.eth`.
 
@@ -337,7 +488,7 @@ ens_name = f"{agent_id}.simcity.eth"     # deterministic, no on-chain call yet
 
 The registrar call itself goes in a new `src/citysim/web3/ens.py` module. Add `register_subdomain(ens_name: str, owner_address: str) -> tx_hash` and call it from `generate_personas`.
 
-### 9.2 HD wallet derivation
+### 10.2 HD wallet derivation
 
 Reproducible wallets from a single mnemonic — agent index is the BIP-44 path index.
 
@@ -358,7 +509,7 @@ Master mnemonic comes from env var `CITYSIM_WALLET_MNEMONIC`. **Do not commit it
 
 Populate `wallet_address` on the `Persona` row from `derive_wallet(...)[0]` inside `generate_personas`.
 
-### 9.3 AXL transport on Gensyn
+### 10.3 AXL transport on Gensyn
 
 Right now `interaction/runner.py::run_dialogue` runs both sides in-process: one Python loop appends to two message histories and calls the LLM gateway directly for each turn. This is fast but bypasses the protocol entirely.
 
@@ -391,7 +542,7 @@ The LLM call still happens — it's just *each side's local LLM call inside thei
 
 For the *simulation* (10k agents, all on one box), you'd run dialogues with `LocalTransport` for speed and `AxlTransport` for protocol-level correctness tests.
 
-### 9.4 Settlement layer
+### 10.4 Settlement layer
 
 When a dialogue ends with `purchased=True`, the buyer's wallet should pay the seller's wallet (or the establishment's treasury). Right now this is just a JSON field on the outcome.
 
@@ -407,7 +558,7 @@ Call it from `interaction/runner.py::run_dialogue` immediately after `_extract_o
 
 Establishments need wallets too — give each one a deterministic address derived from `establishment_id` under a different BIP-44 path (e.g. `m/44'/60'/1'/0/<i>`). Same approach as 9.2.
 
-### 9.5 Where to wire it (summary)
+### 10.5 Where to wire it (summary)
 
 | Concern | File | Hook |
 |---|---|---|
@@ -421,7 +572,7 @@ Establishments need wallets too — give each one a deterministic address derive
 
 The Sim-city codebase is set up so all four can ship as a `citysim.web3` subpackage that other modules import from. No core simulator code needs to know whether the protocol is live — flags + dependency injection keep the local-only path fast for development.
 
-## 10. Development
+## 11. Development
 
 Lint, format, type-check, test:
 
@@ -446,7 +597,7 @@ Useful env vars:
 | `CITYSIM_LLM_PROVIDER_AGENT` | `ollama-openai` | Override agent-tier provider |
 | `CITYSIM_LLM_PROVIDER_AUDIT` | `openai` | Override audit-tier provider |
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 **`zsh: command not found: citysim`** — venv not activated. `source .venv/bin/activate && pip install -e .`.
 
@@ -458,6 +609,6 @@ Useful env vars:
 
 **Viewer build fails on `pnpm install`** — make sure pnpm is v9+ and Node is v20+. `node -v && pnpm -v`.
 
-## 12. Licence
+## 13. Licence
 
 Private project. Not for redistribution.

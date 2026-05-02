@@ -15,16 +15,25 @@ from __future__ import annotations
 
 import random
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from citysim.llm import LLMMessage, get_gateway
 from citysim.store import EventLog
 from citysim.world.establishments import Establishment, EstablishmentKind
 from citysim.world.personas import Persona
 
-from .prompts import EXTRACTION_PROMPT, buyer_system_prompt, seller_system_prompt
+from .prompts import (
+    EXTRACTION_PROMPT,
+    PRODUCT_EXTRACTION_PROMPT,
+    buyer_system_prompt,
+    seller_system_prompt,
+)
+
+if TYPE_CHECKING:
+    from citysim.product import ProductBrief
 
 
 # Establishments that make sense for a customer-facing buyer dialogue.
@@ -58,6 +67,13 @@ class DialogueResult:
     end_reason: str = ""  # "buy" | "leave" | "max_turns"
     outcome: dict[str, Any] = field(default_factory=dict)
     duration_s: float = 0.0
+    # Product testing metadata
+    product_id: str | None = None  # name of the ProductBrief, if any
+    dialogue_kind: str = "generic"  # "product" | "generic"
+    arm: str = "random"  # "random" | "targeted" — A/B sampling arm
+    targeted: bool = False  # whether buyer matched the product target filter
+    # Correlation id (set by run_dialogue) so streaming events can be tied to one row.
+    dialogue_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -111,28 +127,98 @@ def run_dialogue(
     sim_minute: float = 0.0,
     day_of_year: int = 0,
     on_turn: Callable[[DialogueTurn], None] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+    product: ProductBrief | None = None,
+    arm: str = "random",
+    targeted: bool = False,
 ) -> DialogueResult:
     """Run one buyer-seller dialogue. Returns the transcript + outcome.
 
     Pass ``on_turn(turn)`` to stream turns to a callback (e.g. for live
     printing in the CLI). If ``log_to`` is provided, the result is also
     appended to the event log under kind="dialogue".
+
+    Pass ``on_event(payload)`` to stream structured live events. The runner
+    fires three event types — all keyed by ``dialogue_id`` so a UI can
+    correlate them:
+
+    * ``dialogue_started``: includes buyer/seller/establishment/product info
+    * ``dialogue_turn``: one per spoken turn (speaker + text)
+    * ``dialogue_ended``: end_reason + extracted outcome + duration
+
+    If ``product`` is provided AND its category matches ``est.kind``, the
+    seller pitches that specific product, the buyer evaluates buying it,
+    and the audit-tier extractor pulls richer fields (intrinsic motivator,
+    winning phrase, objections, target fit). For non-matching shops the
+    dialogue runs in "generic" mode — useful as a baseline.
     """
     t0 = time.monotonic()
     agent_gw = get_gateway(tier="agent")
 
-    buyer_sys = buyer_system_prompt(buyer, est, seller.occupation)
-    seller_sys = seller_system_prompt(seller, est)
+    is_product_dialogue = product is not None and product.category == est.kind.value
+    active_product = product if is_product_dialogue else None
+
+    buyer_sys = buyer_system_prompt(buyer, est, seller.occupation, active_product)
+    seller_sys = seller_system_prompt(seller, est, active_product)
 
     buyer_history: list[LLMMessage] = [LLMMessage(role="system", content=buyer_sys)]
     seller_history: list[LLMMessage] = [LLMMessage(role="system", content=seller_sys)]
 
+    dialogue_id = uuid.uuid4().hex[:12]
     result = DialogueResult(
         buyer_id=buyer.agent_id,
         seller_id=seller.agent_id,
         establishment_id=est.id,
         establishment_kind=est.kind.value,
+        product_id=product.name if active_product else None,
+        dialogue_kind="product" if is_product_dialogue else "generic",
+        arm=arm,
+        targeted=targeted,
+        dialogue_id=dialogue_id,
     )
+
+    def _emit_turn(t: DialogueTurn) -> None:
+        if on_turn is not None:
+            on_turn(t)
+        if on_event is not None:
+            try:
+                on_event(
+                    {
+                        "type": "dialogue_turn",
+                        "dialogue_id": dialogue_id,
+                        "speaker": t.speaker,
+                        "text": t.text,
+                    }
+                )
+            except Exception:
+                pass
+
+    # Fire dialogue_started up front so the UI can render an empty card.
+    if on_event is not None:
+        try:
+            on_event(
+                {
+                    "type": "dialogue_started",
+                    "dialogue_id": dialogue_id,
+                    "buyer_id": buyer.agent_id,
+                    "buyer_age": buyer.age,
+                    "buyer_gender": buyer.gender,
+                    "buyer_occupation": buyer.occupation,
+                    "buyer_income_band": buyer.income_band,
+                    "seller_id": seller.agent_id,
+                    "seller_occupation": seller.occupation,
+                    "establishment_id": est.id,
+                    "establishment_kind": est.kind.value,
+                    "product_id": result.product_id,
+                    "dialogue_kind": result.dialogue_kind,
+                    "arm": arm,
+                    "targeted": targeted,
+                    "sim_minute": sim_minute,
+                    "day_of_year": day_of_year,
+                }
+            )
+        except Exception:
+            pass
 
     # Free opening line from the seller — saves one LLM call and grounds the
     # conversation in the right context.
@@ -142,8 +228,7 @@ def run_dialogue(
     buyer_history.append(LLMMessage(role="user", content=greeting))
     opening = DialogueTurn(speaker="seller", text=greeting)
     result.turns.append(opening)
-    if on_turn:
-        on_turn(opening)
+    _emit_turn(opening)
 
     end_reason = "max_turns"
     for _ in range(max_turns):
@@ -152,8 +237,7 @@ def run_dialogue(
         buyer_text = resp.text.strip()
         turn = DialogueTurn(speaker="buyer", text=buyer_text)
         result.turns.append(turn)
-        if on_turn:
-            on_turn(turn)
+        _emit_turn(turn)
         buyer_history.append(LLMMessage(role="assistant", content=buyer_text))
         seller_history.append(LLMMessage(role="user", content=buyer_text))
 
@@ -169,8 +253,7 @@ def run_dialogue(
         seller_text = resp.text.strip()
         turn = DialogueTurn(speaker="seller", text=seller_text)
         result.turns.append(turn)
-        if on_turn:
-            on_turn(turn)
+        _emit_turn(turn)
         seller_history.append(LLMMessage(role="assistant", content=seller_text))
         buyer_history.append(LLMMessage(role="user", content=seller_text))
 
@@ -178,7 +261,25 @@ def run_dialogue(
     result.duration_s = time.monotonic() - t0
 
     if extract_outcome:
-        result.outcome = _extract_outcome(result, seller.occupation)
+        result.outcome = _extract_outcome(result, seller.occupation, active_product)
+
+    if on_event is not None:
+        try:
+            on_event(
+                {
+                    "type": "dialogue_ended",
+                    "dialogue_id": dialogue_id,
+                    "end_reason": end_reason,
+                    "duration_s": result.duration_s,
+                    "outcome": result.outcome,
+                    "dialogue_kind": result.dialogue_kind,
+                    "arm": result.arm,
+                    "targeted": result.targeted,
+                    "product_id": result.product_id,
+                }
+            )
+        except Exception:
+            pass
 
     # Log the whole thing (dialogue + outcome) to the event log.
     if log_to is not None:
@@ -187,10 +288,15 @@ def run_dialogue(
             sim_minute=sim_minute,
             day_of_year=day_of_year,
             payload={
+                "dialogue_id": result.dialogue_id,
                 "buyer_id": result.buyer_id,
                 "seller_id": result.seller_id,
                 "establishment_id": result.establishment_id,
                 "establishment_kind": result.establishment_kind,
+                "product_id": result.product_id,
+                "dialogue_kind": result.dialogue_kind,
+                "arm": result.arm,
+                "targeted": result.targeted,
                 "turns": [{"speaker": t.speaker, "text": t.text} for t in result.turns],
                 "end_reason": result.end_reason,
                 "outcome": result.outcome,
@@ -209,29 +315,68 @@ def run_dialogue(
 # ---------------------------------------------------------------------------
 
 
-def _extract_outcome(result: DialogueResult, seller_role: str) -> dict[str, Any]:
+def _extract_outcome(
+    result: DialogueResult,
+    seller_role: str,
+    product: ProductBrief | None,
+) -> dict[str, Any]:
+    """Run the audit-tier extractor on the transcript.
+
+    When ``product`` is set we use the richer product-aware schema
+    (intrinsic_motivator, seller_winning_phrase, objections_raised,
+    target_fit, units, price_sensitivity). Otherwise we fall back to
+    the generic shopping-outcome schema.
+    """
     transcript = "\n".join(f"{t.speaker.upper()}: {t.text}" for t in result.turns)
-    prompt = EXTRACTION_PROMPT.format(
-        role=seller_role.replace("_", " "),
-        kind=result.establishment_kind.replace("_", " "),
-        transcript=transcript,
-    )
+    if product is not None:
+        prompt = PRODUCT_EXTRACTION_PROMPT.format(
+            role=seller_role.replace("_", " "),
+            kind=result.establishment_kind.replace("_", " "),
+            transcript=transcript,
+            product_name=product.name,
+            product_pitch=product.short_description,
+            product_price=f"{product.price:.2f} {product.currency}",
+        )
+    else:
+        prompt = EXTRACTION_PROMPT.format(
+            role=seller_role.replace("_", " "),
+            kind=result.establishment_kind.replace("_", " "),
+            transcript=transcript,
+        )
+
     try:
         gw = get_gateway(tier="audit")
         return gw.chat_json(
             [LLMMessage(role="user", content=prompt)],
             temperature=0.0,
-            max_tokens=300,
+            max_tokens=400,
         )
     except Exception as e:
         # No OpenAI key (or audit gateway misconfigured) — fall back to a
         # rule-based outcome. The transcript is still useful; the structured
         # extraction can be backfilled later by replaying the event log.
+        purchased = result.end_reason == "buy"
+        if product is not None:
+            return {
+                "purchased": purchased,
+                "units": 1 if purchased else 0,
+                "price_paid": product.price if purchased else None,
+                "decisive_factor": "salesperson_pitch" if purchased else "none",
+                "intrinsic_motivator": "none",
+                "seller_winning_phrase": None,
+                "objections_raised": [] if purchased else ["other"],
+                "price_sensitivity": "medium",
+                "target_fit": "none",
+                "regret_signal": 0.0,
+                "followup_intent": None,
+                "_fallback": True,
+                "_fallback_reason": str(e)[:160],
+            }
         return {
-            "purchased": result.end_reason == "buy",
+            "purchased": purchased,
             "product": None,
             "price_paid": None,
-            "decisive_factor": "salesperson_pitch" if result.end_reason == "buy" else "none",
+            "decisive_factor": "salesperson_pitch" if purchased else "none",
             "regret_signal": 0.0,
             "followup_intent": None,
             "_fallback": True,

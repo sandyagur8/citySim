@@ -63,6 +63,18 @@ class SimState:
     persona_store: PersonaStore | None = None
     event_log: EventLog | None = None
 
+    # Latest computed day summary (set after each day rollover). Used by
+    # /api/summary/latest and shipped on /ws init so a late connector still
+    # sees the most recent end-of-day modal.
+    last_day_summary: dict[str, Any] | None = None
+
+    # A small ring of recent dialogue events. Lets the viewer's "Recent
+    # conversations" feed populate immediately on connect, even between ticks.
+    recent_dialogues: list[dict[str, Any]] = field(default_factory=list)
+    # Live counters shipped on every tick — cheap, scales to millions of
+    # dialogues without sending the whole event log.
+    stats: dict[str, Any] = field(default_factory=dict)
+
 
 def build_sim(
     n_agents: int = 10000,
@@ -100,6 +112,7 @@ def build_sim(
         persona_store=store,
         event_log=EventLog(),
     )
+    sim.stats = _empty_stats()
     for a in agents:
         sim.plans[a.id] = plan_day(a, establishments, day_of_week=sim.day_of_week, seed=seed)
     return sim
@@ -171,8 +184,94 @@ async def broadcast(sim: SimState, message: dict[str, Any]) -> None:
         sim.subscribers.discard(q)
 
 
-def _print_day_summary(sim: SimState, day: int) -> None:
-    """Aggregate the day's events from the log and print to stdout.
+# ---------------------------------------------------------------------------
+# Live dialogue feed + stats helpers
+# ---------------------------------------------------------------------------
+
+# Cap on the rolling feed shown by the viewer's right-rail.
+_RECENT_DIALOGUES_MAX = 30
+
+
+def _empty_stats() -> dict[str, Any]:
+    return {
+        "n_dialogues": 0,
+        "n_purchases": 0,
+        "n_product_dialogues": 0,
+        "n_units_sold": 0,
+        "product_revenue": 0.0,
+        "arm_random": {"count": 0, "purchases": 0},
+        "arm_targeted": {"count": 0, "purchases": 0},
+    }
+
+
+def record_dialogue_event(sim: SimState, event: dict[str, Any]) -> None:
+    """Update in-memory stats / recent-dialogue ring from a streaming event.
+
+    Called by the dialogue scheduler's ``on_event`` hook. Pure in-process
+    bookkeeping — actual broadcast is fire-and-forget via ``broadcast()``.
+    """
+    if not sim.stats:
+        sim.stats = _empty_stats()
+
+    et = event.get("type")
+    if et == "dialogue_started":
+        # Push a partial card to the feed; we'll mutate it on dialogue_ended.
+        card = {
+            "dialogue_id": event.get("dialogue_id"),
+            "buyer_id": event.get("buyer_id"),
+            "buyer_age": event.get("buyer_age"),
+            "buyer_occupation": event.get("buyer_occupation"),
+            "establishment_id": event.get("establishment_id"),
+            "establishment_kind": event.get("establishment_kind"),
+            "product_id": event.get("product_id"),
+            "dialogue_kind": event.get("dialogue_kind"),
+            "arm": event.get("arm"),
+            "targeted": event.get("targeted"),
+            "sim_minute": event.get("sim_minute"),
+            "status": "live",
+            "outcome": None,
+        }
+        sim.recent_dialogues.insert(0, card)
+        del sim.recent_dialogues[_RECENT_DIALOGUES_MAX:]
+    elif et == "dialogue_ended":
+        did = event.get("dialogue_id")
+        outcome = event.get("outcome") or {}
+        purchased = bool(outcome.get("purchased") or event.get("end_reason") == "buy")
+        # Update the matching card if still in the ring.
+        for c in sim.recent_dialogues:
+            if c.get("dialogue_id") == did:
+                c["status"] = "ended"
+                c["end_reason"] = event.get("end_reason")
+                c["outcome"] = outcome
+                c["purchased"] = purchased
+                break
+        # Update live stats
+        s = sim.stats
+        s["n_dialogues"] = int(s.get("n_dialogues", 0)) + 1
+        if purchased:
+            s["n_purchases"] = int(s.get("n_purchases", 0)) + 1
+        if event.get("dialogue_kind") == "product":
+            s["n_product_dialogues"] = int(s.get("n_product_dialogues", 0)) + 1
+            if purchased:
+                units = outcome.get("units")
+                u = int(units) if isinstance(units, (int, float)) else 1
+                s["n_units_sold"] = int(s.get("n_units_sold", 0)) + max(1, u)
+                price = outcome.get("price_paid")
+                if isinstance(price, (int, float)):
+                    s["product_revenue"] = float(s.get("product_revenue", 0.0)) + float(
+                        price
+                    ) * max(1, u)
+            arm = "arm_targeted" if event.get("arm") == "targeted" else "arm_random"
+            bucket = s.setdefault(arm, {"count": 0, "purchases": 0})
+            bucket["count"] = int(bucket.get("count", 0)) + 1
+            if purchased:
+                bucket["purchases"] = int(bucket.get("purchases", 0)) + 1
+
+
+async def _emit_day_summary(sim: SimState, day: int) -> None:
+    """Aggregate the day's events from the log, print to stdout, and
+    broadcast a ``day_summary`` WebSocket message so the viewer can show
+    its end-of-day modal without a separate REST poll.
 
     Best-effort — never raises into the tick loop. If the event log isn't
     wired up (e.g. tests), or the day file is empty, we just skip.
@@ -186,6 +285,16 @@ def _print_day_summary(sim: SimState, day: int) -> None:
             persona_store=sim.persona_store,
         )
         print(format_summary(summary), flush=True)
+        await broadcast(
+            sim,
+            {
+                "type": "day_summary",
+                "day": day,
+                "summary": summary.to_dict(),
+            },
+        )
+        # Also stash on sim so a fresh /ws connection can fetch it.
+        sim.last_day_summary = summary.to_dict()
     except Exception:  # noqa: BLE001 - best-effort, don't crash the tick loop
         import traceback
 
@@ -217,8 +326,9 @@ async def tick_loop(sim: SimState) -> None:
                 sim.plans[a.id] = plan_day(
                     a, sim.establishments, day_of_week=sim.day_of_week, seed=sim.day_of_year
                 )
-            # Print the summary for the day that just ended.
-            _print_day_summary(sim, ended_day)
+            # Reset live stats for the new day before broadcasting summary.
+            await _emit_day_summary(sim, ended_day)
+            sim.stats = _empty_stats()
 
         # Broadcast every BROADCAST_EVERY_SIM_MIN sim minutes
         if sim.sim_minute - sim.last_broadcast_min >= BROADCAST_EVERY_SIM_MIN:
@@ -231,12 +341,18 @@ async def tick_loop(sim: SimState) -> None:
                     "day_of_year": sim.day_of_year,
                     "day_of_week": sim.day_of_week,
                     "positions": snapshot_positions(sim),
+                    "stats": sim.stats or _empty_stats(),
                 },
             )
 
 
 def init_payload(sim: SimState) -> dict[str, Any]:
     """Initial message sent on a new WebSocket connection."""
+    # Lazy import to avoid an import cycle at module-load (citysim.product
+    # pulls in citysim.world.establishments).
+    from citysim.product import load_product
+
+    brief = load_product()
     return {
         "type": "init",
         "world": {
@@ -251,6 +367,10 @@ def init_payload(sim: SimState) -> dict[str, Any]:
             "speed_multiplier": sim.speed_multiplier,
             "paused": sim.paused,
         },
+        "product": brief.to_dict() if brief is not None else None,
+        "stats": sim.stats or _empty_stats(),
+        "recent_dialogues": list(sim.recent_dialogues),
+        "last_day_summary": sim.last_day_summary,
     }
 
 
