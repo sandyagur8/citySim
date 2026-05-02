@@ -639,3 +639,46 @@ def push_axl_keys_to_ens(
     ok = sum(1 for r in result if r.get("status") == "ok")
     failed = len(result) - ok
     typer.echo(f"ENS text push done. ok={ok} failed={failed}")
+
+
+@app.command(name="benchmark")
+def benchmark_cmd(
+    n_agents: int = 1000,
+    grid_size: int = 80,
+    seed: int = 42,
+    runs: int = 50,
+    max_turns: int = 6,
+    transport: str = "local",
+    transport_required: bool = False,
+    no_extract: bool = True,
+) -> None:
+    """Run Phase 8 baseline benchmark script."""
+    script = Path(__file__).resolve().parents[2] / "scripts" / "phase8_benchmark.py"
+    if not script.exists():
+        typer.echo(f"Benchmark script missing: {script}")
+        raise typer.Exit(1)
+
+    cmd = [
+        "python",
+        str(script),
+        "--n-agents",
+        str(n_agents),
+        "--grid-size",
+        str(grid_size),
+        "--seed",
+        str(seed),
+        "--runs",
+        str(runs),
+        "--max-turns",
+        str(max_turns),
+        "--transport",
+        transport,
+    ]
+    if transport_required:
+        cmd.append("--transport-required")
+    if no_extract:
+        cmd.append("--no-extract")
+
+    proc = subprocess.run(cmd, check=False, text=True)
+    if proc.returncode != 0:
+        raise typer.Exit(proc.returncode)
