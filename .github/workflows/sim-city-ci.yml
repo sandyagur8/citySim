@@ -1,7 +1,5 @@
 name: sim-city-ci
 
-# Only runs when files inside sim-city/ change, so it doesn't waste minutes
-# on commits that only touch the rest of the citySim repo.
 on:
   push:
     branches: [main]
