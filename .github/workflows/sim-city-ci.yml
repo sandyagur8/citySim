@@ -1,21 +1,32 @@
-name: ci
+name: sim-city-ci
 
+# Only runs when files inside sim-city/ change, so it doesn't waste minutes
+# on commits that only touch the rest of the citySim repo.
 on:
   push:
     branches: [main]
+    paths:
+      - "sim-city/**"
+      - ".github/workflows/sim-city-ci.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "sim-city/**"
+      - ".github/workflows/sim-city-ci.yml"
 
 jobs:
   python:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sim-city
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-        # if you bump pyproject's requires-python, bump this too
           cache: "pip"
+          cache-dependency-path: sim-city/pyproject.toml
       - run: pip install -e ".[dev]"
       - run: ruff check src tests
       - run: ruff format --check src tests
@@ -26,7 +37,7 @@ jobs:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: viewer
+        working-directory: sim-city/viewer
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -36,6 +47,6 @@ jobs:
         with:
           node-version: "20"
           cache: "pnpm"
-          cache-dependency-path: viewer/pnpm-lock.yaml
+          cache-dependency-path: sim-city/viewer/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
