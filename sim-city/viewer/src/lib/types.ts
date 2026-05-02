@@ -66,11 +66,41 @@ export type ProductBriefDict = {
 export type LiveStats = {
   n_dialogues: number;
   n_purchases: number;
+  n_dialogue_errors?: number;
+  n_transport_errors?: number;
+  n_llm_errors?: number;
   n_product_dialogues: number;
   n_units_sold: number;
   product_revenue: number;
   arm_random: { count: number; purchases: number };
   arm_targeted: { count: number; purchases: number };
+};
+
+export type EnsAgentLookup = {
+  agent_id: string;
+  ens_name: string | null;
+  ens_status: string;
+  wallet_address: string | null;
+  axl_key: string | null;
+  demographics: {
+    age: number;
+    gender: string;
+    education: string;
+    income_band: string;
+    occupation: string;
+    household_role: string;
+  };
+  home_cell: [number, number];
+  work_cell: [number, number] | null;
+  card_text: string;
+  prefs: Record<string, unknown>;
+  needs: Record<string, unknown>;
+  establishment: {
+    id: string;
+    kind: string;
+    cell: [number, number];
+    name: string;
+  } | null;
 };
 
 export type DialogueOutcome = {

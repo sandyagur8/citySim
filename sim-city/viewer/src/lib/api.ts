@@ -2,7 +2,7 @@
 // The WebSocket already pushes live state — these are only used to
 // initialise / mutate the product brief from the GUI.
 
-import type { DaySummaryDict, ProductBriefDict } from './types';
+import type { DaySummaryDict, EnsAgentLookup, ProductBriefDict } from './types';
 
 // Empty base = relative URLs go through Vite's dev proxy in dev and the
 // same-origin FastAPI app in prod. Set window.__CITYSIM_API_BASE__ in
@@ -60,6 +60,13 @@ export async function fetchSummary(day: number): Promise<DaySummaryDict | null> 
 export async function fetchLatestSummary(): Promise<DaySummaryDict | null> {
   const res = await fetch(`${base}/api/summary/latest`);
   return jsonOrNull<DaySummaryDict>(res);
+}
+
+export async function fetchAgentByEns(ensName: string): Promise<EnsAgentLookup | null> {
+  const name = ensName.trim();
+  if (!name) return null;
+  const res = await fetch(`${base}/api/agent/by-ens/${encodeURIComponent(name)}`);
+  return jsonOrNull<EnsAgentLookup>(res);
 }
 
 // Categories that match `EstablishmentKind` values that make sense for a

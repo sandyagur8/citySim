@@ -11,6 +11,7 @@ import { CityView } from './components/CityView';
 import { DayNightOverlay } from './components/DayNightOverlay';
 import { DaySummaryModal } from './components/DaySummaryModal';
 import { DialogueFeed } from './components/DialogueFeed';
+import { EnsLookupPanel } from './components/EnsLookupPanel';
 import { ProductSetup } from './components/ProductSetup';
 import { SidePanel } from './components/SidePanel';
 import { StatsHUD } from './components/StatsHUD';
@@ -96,6 +97,7 @@ export default function App() {
 
       {world && (
         <>
+          <EnsLookupPanel />
           <StatsHUD
             stats={stats}
             product={product}
