@@ -231,24 +231,68 @@ Useful when something feels off — confirms the Ollama daemon is reachable and 
 
 ## 6. Running the full simulation
 
-The current build runs the world in real-time inside `citysim serve` (the FastAPI app), with the viewer attached for visualisation. As of this README, dialogues are triggered manually via `citysim run-dialogue` — the **scheduled-dialogues tick loop is the next thing to ship** (where the simulator picks N dialogues per simulated hour based on agent intentions and runs them in the background).
-
-For now:
+`citysim serve` runs the world in real-time inside the FastAPI app and attaches the viewer for visualisation. A background **dialogue worker** is on by default — it continuously picks a random buyer / shoppable-establishment / employee triple from the live world and runs a buyer-seller dialogue through the local LLM, appending the structured outcome to the JSONL event log. At day rollover (every simulated 24h) the simulator prints a per-day activity summary to stdout.
 
 ```bash
-# terminal 1 — simulator + viewer backend
+# terminal 1 — simulator + viewer backend (auto-dialogue on)
 citysim serve --n-agents 10000 --seed 42
 
 # terminal 2 — viewer
 cd viewer && pnpm dev
-
-# terminal 3 — kick off dialogues (loop manually for now)
-for i in $(seq 1 50); do
-  citysim run-dialogue --no-extract
-done
 ```
 
-That fills `~/.citysim/events/events-day0000.jsonl` with 50 dialogue records.
+That's it — leave the simulator running and dialogues will accumulate in `~/.citysim/events/events-day{NNNN}.jsonl`. At each day rollover you'll see something like this in terminal 1:
+
+```
+============================================================
+Day  120  -  daily activity summary
+============================================================
+Dialogues run        : 84
+Purchases committed  : 39
+Conversion rate      : 46.4%
+Avg price paid       : 23.40
+Total spend          : 912.60
+
+By establishment kind:
+  cafe            n=22   buy_rate= 54.5%
+  grocery         n=19   buy_rate= 57.9%
+  ...
+
+By buyer income band:
+  low             n=18   buy_rate= 33.3%
+  middle          n=41   buy_rate= 48.8%
+  upper_middle    n=19   buy_rate= 57.9%
+  ...
+
+Top decisive factors (in completed purchases):
+  price                     14
+  convenience               10
+  ...
+```
+
+Re-print any earlier day's summary at any time with:
+
+```bash
+citysim summary 120
+```
+
+### 6.1 Tuning the dialogue worker
+
+Two env vars (and one CLI flag) control the cadence:
+
+| Var / flag                    | Default | Effect                                                   |
+|-------------------------------|---------|----------------------------------------------------------|
+| `CITYSIM_DIALOGUE_PAUSE_S`    | 5.0     | Real-second sleep between dialogues                      |
+| `CITYSIM_DIALOGUE_MAX_TURNS`  | 6       | Hard cap on turn count per dialogue                      |
+| `--no-auto-dialogue`          | off     | Disable the worker entirely (run manual dialogues only)  |
+
+The actual cadence is dominated by how long the local model takes to generate each turn — typically 3-10 seconds for a 6-turn dialogue on an 8B-class model. At default settings expect dozens of dialogues per simulated day at 60x speed; fewer at higher sim speeds (the LLM, not the clock, becomes the bottleneck).
+
+You can still trigger ad-hoc dialogues alongside the auto-worker:
+
+```bash
+citysim run-dialogue --buyer-id a000042 --store-id e0007
+```
 
 ## 7. Inspecting state
 
