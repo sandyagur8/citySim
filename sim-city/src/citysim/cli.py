@@ -682,3 +682,23 @@ def benchmark_cmd(
     proc = subprocess.run(cmd, check=False, text=True)
     if proc.returncode != 0:
         raise typer.Exit(proc.returncode)
+
+
+@app.command(name="preflight")
+def preflight_cmd(
+    base: str = "http://127.0.0.1:8000",
+    ens: str = "a000000.simcity-7890.eth",
+) -> None:
+    """Run Phase 9 preflight validator against running stack."""
+    script = Path(__file__).resolve().parents[2] / "scripts" / "phase9_preflight.py"
+    if not script.exists():
+        typer.echo(f"Preflight script missing: {script}")
+        raise typer.Exit(1)
+
+    proc = subprocess.run(
+        ["python", str(script), "--base", base, "--ens", ens],
+        check=False,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise typer.Exit(proc.returncode)
