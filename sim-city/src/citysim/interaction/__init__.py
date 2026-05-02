@@ -15,10 +15,12 @@ from .runner import (
     pick_random_store,
     run_dialogue,
 )
+from .scheduler import dialogue_worker
 
 __all__ = [
     "DialogueResult",
     "DialogueTurn",
+    "dialogue_worker",
     "find_employee",
     "pick_random_buyer",
     "pick_random_store",

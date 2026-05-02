@@ -15,7 +15,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
-from citysim.store import PersonaStore
+from citysim.reporting import format_summary, summarize_day
+from citysim.store import EventLog, PersonaStore
 from citysim.world.agents import MODE_SPEED, Agent
 from citysim.world.establishments import Establishment, place_establishments
 from citysim.world.grid import CityGrid, generate_grid
@@ -57,6 +58,11 @@ class SimState:
     # Lookups for the interaction runner / API
     persona_by_id: dict[str, Persona] = field(default_factory=dict)
 
+    # Storage handles (set by build_sim) — used by the dialogue scheduler
+    # and the day-rollover summary hook in tick_loop.
+    persona_store: PersonaStore | None = None
+    event_log: EventLog | None = None
+
 
 def build_sim(
     n_agents: int = 10000,
@@ -91,6 +97,8 @@ def build_sim(
         agents=agents,
         personas=personas,
         persona_by_id={p.agent_id: p for p in personas},
+        persona_store=store,
+        event_log=EventLog(),
     )
     for a in agents:
         sim.plans[a.id] = plan_day(a, establishments, day_of_week=sim.day_of_week, seed=seed)
@@ -163,6 +171,27 @@ async def broadcast(sim: SimState, message: dict[str, Any]) -> None:
         sim.subscribers.discard(q)
 
 
+def _print_day_summary(sim: SimState, day: int) -> None:
+    """Aggregate the day's events from the log and print to stdout.
+
+    Best-effort — never raises into the tick loop. If the event log isn't
+    wired up (e.g. tests), or the day file is empty, we just skip.
+    """
+    if sim.event_log is None:
+        return
+    try:
+        summary = summarize_day(
+            day,
+            event_log=sim.event_log,
+            persona_store=sim.persona_store,
+        )
+        print(format_summary(summary), flush=True)
+    except Exception:  # noqa: BLE001 - best-effort, don't crash the tick loop
+        import traceback
+
+        traceback.print_exc()
+
+
 async def tick_loop(sim: SimState) -> None:
     """Advance the clock and broadcast position deltas to all subscribers."""
     last = time.monotonic()
@@ -179,6 +208,7 @@ async def tick_loop(sim: SimState) -> None:
 
         # Wrap day
         if sim.sim_minute >= 1440:
+            ended_day = sim.day_of_year
             sim.sim_minute -= 1440
             sim.day_of_year += 1
             sim.day_of_week = (sim.day_of_week + 1) % 7
@@ -187,6 +217,8 @@ async def tick_loop(sim: SimState) -> None:
                 sim.plans[a.id] = plan_day(
                     a, sim.establishments, day_of_week=sim.day_of_week, seed=sim.day_of_year
                 )
+            # Print the summary for the day that just ended.
+            _print_day_summary(sim, ended_day)
 
         # Broadcast every BROADCAST_EVERY_SIM_MIN sim minutes
         if sim.sim_minute - sim.last_broadcast_min >= BROADCAST_EVERY_SIM_MIN:

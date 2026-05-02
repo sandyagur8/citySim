@@ -18,17 +18,28 @@ def serve(
     grid_size: int = 150,
     seed: int = 42,
     log_level: str = "info",
+    auto_dialogue: bool = True,
 ) -> None:
     """Run the simulator HTTP/WebSocket server.
 
     First boot generates personas into ~/.citysim/citysim.db (10k rows,
     a few seconds). Subsequent boots reuse the stored personas if the
     world signature (n_agents/seed/grid_size) matches.
+
+    Auto-dialogue is on by default — a background worker fires one
+    buyer-seller dialogue at a time through the local LLM and appends
+    the result to the JSONL event log. At day rollover the simulator
+    prints a summary to stdout. Disable with ``--no-auto-dialogue``.
     """
     logging.basicConfig(level=log_level.upper())
     from citysim.server.app import create_app
 
-    application = create_app(n_agents=n_agents, grid_size=grid_size, seed=seed)
+    application = create_app(
+        n_agents=n_agents,
+        grid_size=grid_size,
+        seed=seed,
+        auto_dialogue=auto_dialogue,
+    )
     uvicorn.run(application, host=host, port=port, log_level=log_level)
 
 
@@ -190,6 +201,31 @@ def run_dialogue_cmd(
     typer.echo(f"Ended: {result.end_reason} after {result.duration_s:.1f}s")
     typer.echo(f"Outcome: {result.outcome}")
     typer.echo(f"Logged to {log.dir}")
+
+
+@app.command()
+def summary(day: int) -> None:
+    """Print the activity summary for one simulated day.
+
+    Reads ~/.citysim/events/events-day{DAY:04d}.jsonl, aggregates the
+    dialogues into counts / conversion / breakdowns / top factors, and
+    prints a terminal-friendly report. The same render the simulator
+    emits at day rollover — this command lets you re-inspect any
+    earlier day at any time.
+
+    Examples:
+      citysim summary 120
+      citysim summary 121
+    """
+    from citysim.reporting import format_summary, summarize_day
+    from citysim.store import EventLog, PersonaStore
+
+    log = EventLog()
+    store = PersonaStore()
+    s = summarize_day(day, event_log=log, persona_store=store)
+    typer.echo(format_summary(s))
+    if s.n_dialogues == 0:
+        typer.echo(f"(Looked in {log.dir / f'events-day{day:04d}.jsonl'})")
 
 
 @app.command(name="llm-test")
