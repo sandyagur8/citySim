@@ -41,6 +41,7 @@ export default function App() {
   // open the page, fill in a product, watch dialogues stream in.
   const [productSetupOpen, setProductSetupOpen] = useState(false);
   const [productSetupAuto, setProductSetupAuto] = useState(false);
+  const [ensLookupOpen, setEnsLookupOpen] = useState(true);
 
   useEffect(() => {
     if (world && !product && !productSetupAuto) {
@@ -97,7 +98,16 @@ export default function App() {
 
       {world && (
         <>
-          <EnsLookupPanel />
+          {!ensLookupOpen && (
+            <button
+              type="button"
+              onClick={() => setEnsLookupOpen(true)}
+              className="absolute top-14 left-3 z-20 rounded bg-neutral-900/95 border border-neutral-700 px-3 py-1.5 text-xs text-neutral-200 hover:border-neutral-500"
+            >
+              Open ENS Lookup
+            </button>
+          )}
+          {ensLookupOpen && <EnsLookupPanel onClose={() => setEnsLookupOpen(false)} />}
           <StatsHUD
             stats={stats}
             product={product}
@@ -120,6 +130,7 @@ export default function App() {
       {productSetupOpen && (
         <ProductSetup
           initial={product}
+          onSetConcurrentAgents={(n) => send({ type: 'set_dialogue_workers', value: n })}
           onClose={() => setProductSetupOpen(false)}
           onSaved={() => {
             // useSimStream will refresh `product` from the WS broadcast.

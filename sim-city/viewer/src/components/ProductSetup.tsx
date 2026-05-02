@@ -21,6 +21,7 @@ type Props = {
   initial: ProductBriefDict | null;
   onClose: () => void;
   onSaved: (b: ProductBriefDict) => void;
+  onSetConcurrentAgents: (n: number) => void;
 };
 
 function Toggle({
@@ -45,7 +46,12 @@ function Toggle({
   );
 }
 
-export function ProductSetup({ initial, onClose, onSaved }: Props) {
+export function ProductSetup({
+  initial,
+  onClose,
+  onSaved,
+  onSetConcurrentAgents,
+}: Props) {
   const [brief, setBrief] = useState<ProductBriefDict>(
     initial ?? emptyProductBrief(),
   );
@@ -54,6 +60,7 @@ export function ProductSetup({ initial, onClose, onSaved }: Props) {
   );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [concurrentAgents, setConcurrentAgents] = useState<number>(1);
 
   useEffect(() => {
     if (initial) {
@@ -112,6 +119,7 @@ export function ProductSetup({ initial, onClose, onSaved }: Props) {
         key_features: features,
       };
       const saved = await saveProduct(payload);
+      onSetConcurrentAgents(Math.max(1, Math.floor(concurrentAgents || 1)));
       onSaved(saved);
       onClose();
     } catch (err) {
@@ -225,6 +233,23 @@ export function ProductSetup({ initial, onClose, onSaved }: Props) {
                   </option>
                 ))}
               </select>
+            </label>
+            <label className="block sm:col-span-2">
+              <span className="text-xs uppercase tracking-wider text-neutral-400">
+                Concurrent agents (dialogue workers)
+              </span>
+              <input
+                type="number"
+                min={1}
+                max={32}
+                step={1}
+                className="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
+                value={concurrentAgents}
+                onChange={(e) => setConcurrentAgents(parseInt(e.target.value || '1', 10))}
+              />
+              <p className="mt-1 text-[11px] text-neutral-500">
+                Runtime tuning. Higher value = more parallel conversations.
+              </p>
             </label>
           </div>
 

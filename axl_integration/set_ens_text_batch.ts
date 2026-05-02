@@ -7,6 +7,7 @@ import { setTextRecord } from '@ensdomains/ensjs/wallet';
 
 type Job = { agent_id: string; ens_name: string; text_value: string };
 type Res = { agent_id: string; ens_name: string; status: 'ok' | 'failed'; tx_hash?: string; error?: string };
+type JobState = { job: Job; tx?: `0x${string}`; error?: string };
 
 function loadEnv(): Record<string, string> {
   const out: Record<string, string> = {};
@@ -36,23 +37,56 @@ async function main() {
   const walletClient = createWalletClient({ account, chain: addEnsContracts(sepolia), transport: http(rpc) });
   const out: Res[] = [];
   console.error(`[text-push] jobs=${jobs.length}`);
-  for (const job of jobs) {
+  const states: JobState[] = jobs.map((job) => ({ job }));
+
+  // Phase A: submit all transactions quickly.
+  for (const s of states) {
     try {
-      console.error(`[text-push] submit ${job.ens_name}...`);
-      const tx = await setTextRecord(walletClient, {
-        name: job.ens_name,
+      console.error(`[text-push] submit ${s.job.ens_name}...`);
+      s.tx = await setTextRecord(walletClient, {
+        name: s.job.ens_name,
         key: 'axl_key',
-        value: job.text_value,
+        value: s.job.text_value,
         resolverAddress,
       });
-      console.error(`[text-push] tx sent ${job.ens_name} ${tx.slice(0, 10)}... waiting receipt`);
-      await publicClient.waitForTransactionReceipt({ hash: tx });
-      console.error(`[text-push] confirmed ${job.ens_name}`);
-      out.push({ agent_id: job.agent_id, ens_name: job.ens_name, status: 'ok', tx_hash: tx });
+      console.error(`[text-push] tx sent ${s.job.ens_name} ${s.tx.slice(0, 10)}...`);
     } catch (e) {
-      console.error(`[text-push] failed ${job.ens_name}: ${String(e).slice(0, 220)}`);
-      out.push({ agent_id: job.agent_id, ens_name: job.ens_name, status: 'failed', error: String(e) });
+      s.error = String(e);
+      console.error(`[text-push] submit failed ${s.job.ens_name}: ${s.error.slice(0, 220)}`);
     }
+  }
+
+  // Phase B: wait confirmations in parallel.
+  await Promise.all(
+    states
+      .filter((s) => s.tx && !s.error)
+      .map(async (s) => {
+        try {
+          await publicClient.waitForTransactionReceipt({ hash: s.tx! });
+          console.error(`[text-push] confirmed ${s.job.ens_name}`);
+        } catch (e) {
+          s.error = String(e);
+          console.error(`[text-push] confirm failed ${s.job.ens_name}: ${s.error.slice(0, 220)}`);
+        }
+      }),
+  );
+
+  for (const s of states) {
+    if (s.error || !s.tx) {
+      out.push({
+        agent_id: s.job.agent_id,
+        ens_name: s.job.ens_name,
+        status: 'failed',
+        error: s.error || 'unknown_error',
+      });
+      continue;
+    }
+    out.push({
+      agent_id: s.job.agent_id,
+      ens_name: s.job.ens_name,
+      status: 'ok',
+      tx_hash: s.tx,
+    });
   }
   fs.writeFileSync(output, JSON.stringify(out), 'utf-8');
 }

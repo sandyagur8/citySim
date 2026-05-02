@@ -267,7 +267,8 @@ export type ServerMessage =
 export type ControlMessage =
   | { type: 'set_speed'; value: number }
   | { type: 'set_paused'; value: boolean }
-  | { type: 'jump_to_minute'; value: number };
+  | { type: 'jump_to_minute'; value: number }
+  | { type: 'set_dialogue_workers'; value: number };
 
 // Zoning enum values (must match Python `Zoning`)
 export const ZONING = {

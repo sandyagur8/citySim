@@ -56,7 +56,45 @@ def create_app(
 ) -> FastAPI:
     sim_holder: dict[str, SimState] = {}
     tick_task: dict[str, asyncio.Task[Any]] = {}
-    dialogue_task: dict[str, asyncio.Task[Any]] = {}
+    dialogue_tasks: list[asyncio.Task[Any]] = []
+    on_event_holder: dict[str, Any] = {}
+    desired_dialogue_workers = max(
+        1,
+        int(os.environ.get("CITYSIM_DIALOGUE_WORKERS", "1")),
+    )
+
+    async def _reconcile_dialogue_workers(target_count: int) -> None:
+        nonlocal desired_dialogue_workers
+        desired_dialogue_workers = max(1, target_count)
+        sim = sim_holder.get("sim")
+        if sim is None or not auto_dialogue or sim.event_log is None:
+            return
+
+        current = len(dialogue_tasks)
+        on_event_cb = on_event_holder.get("cb")
+        if desired_dialogue_workers > current:
+            for i in range(current, desired_dialogue_workers):
+                task = asyncio.create_task(
+                    dialogue_worker(
+                        sim,
+                        sim.event_log,
+                        worker_id=i + 1,
+                        initial_jitter_s=float(i) * 0.5,
+                        on_event=on_event_cb,
+                    )
+                )
+                dialogue_tasks.append(task)
+        elif desired_dialogue_workers < current:
+            to_stop = dialogue_tasks[desired_dialogue_workers:]
+            del dialogue_tasks[desired_dialogue_workers:]
+            for t in to_stop:
+                t.cancel()
+            for t in to_stop:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+        log.info("Auto-dialogue workers active=%d", len(dialogue_tasks))
 
     # Auto-dialogue is on by default; disable with auto_dialogue=False
     # or env var CITYSIM_AUTO_DIALOGUE=0/false.
@@ -98,10 +136,9 @@ def create_app(
 
                 loop.call_soon_threadsafe(_apply)
 
-            dialogue_task["task"] = asyncio.create_task(
-                dialogue_worker(sim, sim.event_log, on_event=_on_event)
-            )
-            log.info("Auto-dialogue worker started (live event stream enabled)")
+            on_event_holder["cb"] = _on_event
+            await _reconcile_dialogue_workers(desired_dialogue_workers)
+            log.info("Auto-dialogue worker pool ready (live event stream enabled)")
         else:
             log.info("Auto-dialogue worker disabled")
         try:
@@ -112,10 +149,11 @@ def create_app(
                 await tick_task["task"]
             except (asyncio.CancelledError, Exception):
                 pass
-            if "task" in dialogue_task:
-                dialogue_task["task"].cancel()
+            for t in dialogue_tasks:
+                t.cancel()
+            for t in dialogue_tasks:
                 try:
-                    await dialogue_task["task"]
+                    await t
                 except (asyncio.CancelledError, Exception):
                     pass
 
@@ -304,7 +342,14 @@ def create_app(
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                apply_control(sim, msg)
+                if msg.get("type") == "set_dialogue_workers":
+                    try:
+                        target = int(msg.get("value", desired_dialogue_workers))
+                    except (ValueError, TypeError):
+                        continue
+                    await _reconcile_dialogue_workers(target)
+                else:
+                    apply_control(sim, msg)
 
         tasks = [asyncio.create_task(sender()), asyncio.create_task(receiver())]
         try:

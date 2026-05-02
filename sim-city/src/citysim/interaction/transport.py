@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Protocol
@@ -31,6 +32,8 @@ class AxlTransport:
     poll_interval_s: float = 0.2
     send_retries: int = 2
     backoff_s: float = 0.4
+    node_a_peer_id: str = ""
+    node_b_peer_id: str = ""
 
     @classmethod
     def from_env(cls) -> AxlTransport:
@@ -41,6 +44,8 @@ class AxlTransport:
             poll_interval_s=float(os.environ.get("CITYSIM_AXL_POLL_INTERVAL_S", "0.2")),
             send_retries=int(os.environ.get("CITYSIM_AXL_SEND_RETRIES", "2")),
             backoff_s=float(os.environ.get("CITYSIM_AXL_BACKOFF_S", "0.4")),
+            node_a_peer_id=os.environ.get("CITYSIM_AXL_NODE_A_PEER_ID", "").strip(),
+            node_b_peer_id=os.environ.get("CITYSIM_AXL_NODE_B_PEER_ID", "").strip(),
         )
 
     def _port_for(self, agent: Persona) -> int:
@@ -48,12 +53,29 @@ class AxlTransport:
         idx = int(agent.agent_id[1:]) if agent.agent_id[1:].isdigit() else 0
         return self.node_a_port if idx % 2 == 0 else self.node_b_port
 
+    def _is_peer_id(self, value: str | None) -> bool:
+        if not value:
+            return False
+        return bool(re.fullmatch(r"[0-9a-fA-F]{64}", value.strip()))
+
+    def _destination_peer_id(self, to_agent: Persona, receiver_port: int) -> str:
+        # Preferred: explicit node peer-id mapping by receiver shard.
+        if receiver_port == self.node_a_port and self._is_peer_id(self.node_a_peer_id):
+            return self.node_a_peer_id
+        if receiver_port == self.node_b_port and self._is_peer_id(self.node_b_peer_id):
+            return self.node_b_peer_id
+        # Fallback: use persona axl_key only if it looks like a real peer id.
+        if self._is_peer_id(to_agent.axl_key):
+            return to_agent.axl_key.strip()
+        raise RuntimeError(
+            f"Missing valid destination peer id for {to_agent.agent_id}. "
+            "Set CITYSIM_AXL_NODE_A_PEER_ID and CITYSIM_AXL_NODE_B_PEER_ID."
+        )
+
     def send(self, from_agent: Persona, to_agent: Persona, payload: str) -> str:
         sender_port = self._port_for(from_agent)
         receiver_port = self._port_for(to_agent)
-        destination = to_agent.axl_key
-        if not destination:
-            raise RuntimeError(f"Missing axl_key for {to_agent.agent_id}")
+        destination = self._destination_peer_id(to_agent, receiver_port)
 
         log.debug(
             "axl-send start from=%s to=%s sender_port=%d receiver_port=%d payload_len=%d",

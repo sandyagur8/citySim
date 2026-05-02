@@ -702,3 +702,136 @@ def preflight_cmd(
     )
     if proc.returncode != 0:
         raise typer.Exit(proc.returncode)
+
+
+@app.command(name="sync-ens-status")
+def sync_ens_status(
+    limit: int = 1000,
+    concurrency: int = 20,
+    script_path: str = "../axl_integration/probe_ens_records.ts",
+) -> None:
+    """Sync local ens_status against on-chain ENS owner/text state."""
+    from citysim.store import PersonaStore
+
+    store = PersonaStore()
+    rows = store.all()
+    targets = [r for r in rows if r.ens_name][: max(0, limit)]
+    if not targets:
+        typer.echo("No personas with ens_name found.")
+        return
+
+    script_abs = Path(script_path).resolve()
+    if not script_abs.exists():
+        typer.echo(f"ENS probe script not found: {script_abs}")
+        raise typer.Exit(1)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
+        jobs = [
+            {
+                "agent_id": r.agent_id,
+                "ens_name": r.ens_name,
+                "expected_axl_key": r.axl_key,
+            }
+            for r in targets
+        ]
+        json.dump(jobs, tmp)
+        tmp.flush()
+        tmp_path = tmp.name
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as out:
+        out_path = out.name
+
+    proc = subprocess.run(
+        ["npx", "tsx", str(script_abs), tmp_path, out_path, str(concurrency)],
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        typer.echo("ENS probe worker failed.")
+        raise typer.Exit(1)
+
+    with open(out_path, encoding="utf-8") as f:
+        result = json.load(f)
+
+    by_id = {r.agent_id: r for r in rows}
+    active = 0
+    minted = 0
+    pending = 0
+    failed = 0
+    for rec in result:
+        row = by_id.get(rec.get("agent_id"))
+        if not row:
+            continue
+        if rec.get("error"):
+            row.ens_status = "failed"
+            failed += 1
+        elif rec.get("minted"):
+            onchain_axl = (rec.get("axl_key") or "").strip()
+            if onchain_axl:
+                row.axl_key = onchain_axl
+            if rec.get("axl_key_match"):
+                row.ens_status = "active"
+                active += 1
+            else:
+                row.ens_status = "minted"
+                minted += 1
+        else:
+            row.ens_status = "pending"
+            pending += 1
+
+    store.insert_many(rows)
+    typer.echo(f"ENS sync done. active={active} minted={minted} pending={pending} failed={failed}")
+
+
+@app.command(name="bootstrap-ens")
+def bootstrap_ens(
+    n_agents: int = 100,
+    grid_size: int = 80,
+    seed: int = 42,
+    batch_size: int = 20,
+    account_group: int = 0,
+    force_regenerate: bool = True,
+) -> None:
+    """One command: generate personas + mint ENS + push keys + sync status."""
+    from citysim.store import PersonaStore
+    from citysim.world.establishments import place_establishments
+    from citysim.world.grid import generate_grid
+    from citysim.world.personas import load_or_generate_personas
+
+    if force_regenerate:
+        typer.echo("[1/6] Regenerate personas...")
+        store = PersonaStore()
+        grid = generate_grid(size=grid_size, seed=seed)
+        establishments = place_establishments(grid, seed=seed)
+        personas = load_or_generate_personas(
+            grid,
+            establishments,
+            n=n_agents,
+            seed=seed,
+            store=store,
+            force_regenerate=True,
+            signature_extra="bootstrap_ens",
+        )
+        typer.echo(f"Generated {len(personas)} personas")
+    else:
+        typer.echo("[1/6] Reuse existing personas")
+
+    typer.echo("[2/6] Backfill wallets...")
+    backfill_wallets(account_group=account_group, dry_run=False)
+
+    typer.echo("[3/6] Backfill axl keys...")
+    backfill_axl_keys(dry_run=False)
+
+    typer.echo(f"[4/6] Mint ENS subnames in batches of {batch_size}...")
+    while True:
+        rows = PersonaStore().all()
+        pending_count = len([r for r in rows if (r.ens_status or "pending") not in ("minted", "active") and r.ens_name])
+        if pending_count <= 0:
+            break
+        typer.echo(f"Pending mint={pending_count} -> next batch")
+        mint_ens_subnames(limit=batch_size, dry_run=False)
+
+    typer.echo("[5/6] Push axl_key text records in one fast batch...")
+    push_axl_keys_to_ens(limit=max(1, n_agents * 2), dry_run=False)
+
+    typer.echo("[6/6] Sync ENS status from chain...")
+    sync_ens_status(limit=max(1, n_agents * 2), concurrency=max(10, batch_size))

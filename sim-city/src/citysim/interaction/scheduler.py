@@ -129,6 +129,8 @@ async def dialogue_worker(
     sim: SimState,
     event_log: EventLog,
     *,
+    worker_id: int = 1,
+    initial_jitter_s: float = 0.0,
     pause_s: float | None = None,
     max_turns: int | None = None,
     extract_outcome: bool = True,
@@ -178,7 +180,8 @@ async def dialogue_worker(
         log.info("dialogue_worker: GENERIC mode (no product brief loaded)")
 
     log.info(
-        "dialogue_worker: pause=%.1fs, max_turns=%d, extract=%s, baseline_ratio=%.2f, transport=%s required=%s",
+        "dialogue_worker[%d]: pause=%.1fs, max_turns=%d, extract=%s, baseline_ratio=%.2f, transport=%s required=%s",
+        worker_id,
         actual_pause,
         actual_turns,
         extract_outcome,
@@ -190,6 +193,8 @@ async def dialogue_worker(
     iteration = 0
     while True:
         try:
+            if iteration == 0 and initial_jitter_s > 0:
+                await asyncio.sleep(initial_jitter_s)
             await asyncio.sleep(actual_pause)
 
             if not sim.personas or not sim.establishments:
@@ -287,7 +292,8 @@ async def dialogue_worker(
                 transport_required=transport_required,
             )
             log.debug(
-                "dialogue: buyer=%s seller=%s est=%s arm=%s targeted=%s day=%d",
+                "dialogue[%d]: buyer=%s seller=%s est=%s arm=%s targeted=%s day=%d",
+                worker_id,
                 buyer.agent_id,
                 seller.agent_id,
                 est.id,

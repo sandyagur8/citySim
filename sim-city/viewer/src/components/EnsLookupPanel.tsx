@@ -3,7 +3,11 @@ import { useState } from 'react';
 import { fetchAgentByEns } from '../lib/api';
 import type { EnsAgentLookup } from '../lib/types';
 
-export function EnsLookupPanel() {
+type Props = {
+  onClose: () => void;
+};
+
+export function EnsLookupPanel({ onClose }: Props) {
   const [ens, setEns] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +34,17 @@ export function EnsLookupPanel() {
 
   return (
     <section className="absolute top-14 left-3 z-20 w-[26rem] max-w-[calc(100vw-1.5rem)] bg-neutral-900/95 border border-neutral-800 rounded-lg p-3 text-xs text-neutral-100 shadow-xl">
-      <div className="text-[11px] uppercase tracking-wide text-neutral-400 mb-2">ENS Lookup</div>
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-[11px] uppercase tracking-wide text-neutral-400">ENS Lookup</div>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-neutral-400 hover:text-neutral-100 text-sm leading-none px-1"
+          aria-label="Close ENS lookup"
+        >
+          ×
+        </button>
+      </div>
       <div className="flex gap-2">
         <input
           value={ens}
