@@ -262,7 +262,7 @@ export function ProductSetup({
               <input
                 type="number"
                 min={1}
-                max={16}
+                max={10}
                 step={1}
                 className="mt-1 w-full bg-neutral-800 border border-neutral-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-emerald-500"
                 value={axlNodeCount}

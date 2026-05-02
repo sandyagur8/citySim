@@ -27,6 +27,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
+from citysim.env import load_env_file
 from citysim.interaction import dialogue_worker
 from citysim.product import (
     ProductBrief,
@@ -47,6 +48,10 @@ from citysim.server.sim import (
 
 log = logging.getLogger("citysim.server")
 
+# Load .env for engine/runtime tuning parameters when app is imported directly
+# (e.g. uvicorn citysim.server.app:app) and when launched via CLI.
+load_env_file(override=False)
+
 
 def create_app(
     n_agents: int = 100,
@@ -65,6 +70,7 @@ def create_app(
         1,
         int(os.environ.get("CITYSIM_DIALOGUE_WORKERS", "1")),
     )
+    max_axl_nodes = 10
 
     async def _reconcile_dialogue_workers(target_count: int) -> None:
         nonlocal desired_dialogue_workers
@@ -111,7 +117,7 @@ def create_app(
         "yes",
         "on",
     }
-    desired_axl_nodes = max(1, int(os.environ.get("CITYSIM_AXL_NODE_COUNT", "2")))
+    desired_axl_nodes = min(max_axl_nodes, max(1, int(os.environ.get("CITYSIM_AXL_NODE_COUNT", "2"))))
     repo_root = Path(__file__).resolve().parents[4]
     axl_bin = repo_root / "axl" / "node"
     axl_cfg_dir = repo_root / "axl_integration"
@@ -129,7 +135,7 @@ def create_app(
 
     async def _reconcile_axl_nodes(target_count: int) -> None:
         nonlocal desired_axl_nodes
-        desired_axl_nodes = max(1, target_count)
+        desired_axl_nodes = min(max_axl_nodes, max(1, target_count))
         os.environ["CITYSIM_AXL_NODE_COUNT"] = str(desired_axl_nodes)
         if not autos_spawn_axl:
             return
@@ -179,6 +185,23 @@ def create_app(
         ports = [str(p) for p in (_config_port(c) for c in active_cfgs) if p is not None]
         if ports:
             os.environ["CITYSIM_AXL_NODE_PORTS"] = ",".join(ports)
+
+            # Discover peer IDs from each running node topology and wire transport automatically.
+            peer_ids: list[str] = []
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                for ps in ports:
+                    try:
+                        resp = await client.get(f"http://127.0.0.1:{ps}/topology")
+                        if resp.status_code != http.HTTPStatus.OK:
+                            continue
+                        top = resp.json()
+                        key = str(top.get("our_public_key") or "").strip()
+                        if key:
+                            peer_ids.append(key)
+                    except Exception:
+                        continue
+            if peer_ids:
+                os.environ["CITYSIM_AXL_NODE_PEER_IDS"] = ",".join(peer_ids)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]

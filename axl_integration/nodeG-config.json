@@ -1,0 +1,11 @@
+{
+  "PrivateKeyPath": "../axl_integration/nodeG.pem",
+  "Peers": [
+    "tcp://127.0.0.1:7000"
+  ],
+  "Listen": [
+    "tcp://127.0.0.1:7006"
+  ],
+  "api_port": 9062,
+  "tcp_port": 7006
+}

@@ -12,6 +12,10 @@ from pathlib import Path
 import typer
 import uvicorn
 
+from citysim.env import load_env_file
+
+load_env_file(override=False)
+
 app = typer.Typer(help="Sim-city — synthetic city simulator.")
 
 
