@@ -204,12 +204,25 @@ def _empty_stats() -> dict[str, Any]:
     return {
         "n_dialogues": 0,
         "n_purchases": 0,
+        "n_dialogue_errors": 0,
+        "n_transport_errors": 0,
+        "n_llm_errors": 0,
         "n_product_dialogues": 0,
         "n_units_sold": 0,
         "product_revenue": 0.0,
         "arm_random": {"count": 0, "purchases": 0},
         "arm_targeted": {"count": 0, "purchases": 0},
     }
+
+
+def record_dialogue_error(sim: SimState, *, kind: str = "unknown") -> None:
+    if not sim.stats:
+        sim.stats = _empty_stats()
+    sim.stats["n_dialogue_errors"] = int(sim.stats.get("n_dialogue_errors", 0)) + 1
+    if kind == "transport":
+        sim.stats["n_transport_errors"] = int(sim.stats.get("n_transport_errors", 0)) + 1
+    elif kind == "llm":
+        sim.stats["n_llm_errors"] = int(sim.stats.get("n_llm_errors", 0)) + 1
 
 
 def record_dialogue_event(sim: SimState, event: dict[str, Any]) -> None:

@@ -273,6 +273,14 @@ class PersonaStore:
             r = c.execute("SELECT * FROM personas WHERE agent_id=?", (agent_id,)).fetchone()
         return PersonaRow.from_db(r) if r else None
 
+    def get_by_ens_name(self, ens_name: str) -> PersonaRow | None:
+        with self._connect() as c:
+            r = c.execute(
+                "SELECT * FROM personas WHERE lower(ens_name)=lower(?) LIMIT 1",
+                (ens_name,),
+            ).fetchone()
+        return PersonaRow.from_db(r) if r else None
+
     def by_segment(
         self,
         *,

@@ -117,6 +117,9 @@ def buyer_system_prompt(
         f"How to talk:\n"
         f"- One or two short sentences per turn. Speak like a normal person.\n"
         f"- Don't be overly polite. Be honest. Raise objections naturally if you have them.\n"
+        f"- Never output bullet lists, numbered lists, headings, or 'Here are...' style templates.\n"
+        f"- Do not give generic advice. React to THIS shop and THIS conversation only.\n"
+        f"- Avoid canned starters like 'Absolutely', 'Of course', 'No problem' unless truly natural.\n"
         f"- If you decide to buy, end the message with the literal token [BUY].\n"
         f"- If you've heard enough and want to leave, end with [LEAVE].\n"
         f"- Use a tag only when you've truly decided — never on greetings.\n"
@@ -167,6 +170,9 @@ def seller_system_prompt(
         f"- One or two short sentences per turn.\n"
         f"- Greet, listen, recommend something appropriate.\n"
         f"- Don't end every turn with a question — that's exhausting.\n"
+        f"- Never output bullet lists, numbered lists, headings, or 'Here are...' style templates.\n"
+        f"- Be concrete and specific to the product or request in this conversation.\n"
+        f"- Avoid repetitive canned starters (Absolutely/Of course/Certainly) unless natural.\n"
         f"- You aren't trying to scam anyone, but you'd like to make the sale.\n"
     )
 

@@ -43,7 +43,9 @@ from citysim.interaction.runner import (
     pick_random_store,
     run_dialogue,
 )
+from citysim.interaction.transport import AxlTransport, LocalTransport, Transport
 from citysim.product import ProductBrief, load_product, matches_target
+from citysim.server.sim import record_dialogue_error
 from citysim.store import EventLog
 from citysim.world.establishments import Establishment
 from citysim.world.personas import Persona
@@ -147,6 +149,14 @@ async def dialogue_worker(
     actual_pause = pause_s if pause_s is not None else _env_float("CITYSIM_DIALOGUE_PAUSE_S", 5.0)
     actual_turns = max_turns if max_turns is not None else _env_int("CITYSIM_DIALOGUE_MAX_TURNS", 6)
     baseline_ratio = max(0.0, min(1.0, _env_float("CITYSIM_BASELINE_RATIO", 0.25)))
+    transport_kind = os.environ.get("CITYSIM_TRANSPORT", "local").strip().lower()
+    transport_required = os.environ.get("CITYSIM_TRANSPORT_REQUIRED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    transport: Transport = AxlTransport.from_env() if transport_kind == "axl" else LocalTransport()
 
     brief = load_product()
     # Note the file's mtime so we can hot-reload when the REST CRUD endpoints
@@ -168,11 +178,13 @@ async def dialogue_worker(
         log.info("dialogue_worker: GENERIC mode (no product brief loaded)")
 
     log.info(
-        "dialogue_worker: pause=%.1fs, max_turns=%d, extract=%s, baseline_ratio=%.2f",
+        "dialogue_worker: pause=%.1fs, max_turns=%d, extract=%s, baseline_ratio=%.2f, transport=%s required=%s",
         actual_pause,
         actual_turns,
         extract_outcome,
         baseline_ratio,
+        transport_kind,
+        transport_required,
     )
 
     iteration = 0
@@ -271,6 +283,8 @@ async def dialogue_worker(
                 arm=arm,
                 targeted=targeted,
                 on_event=on_event,
+                transport=transport,
+                transport_required=transport_required,
             )
             log.debug(
                 "dialogue: buyer=%s seller=%s est=%s arm=%s targeted=%s day=%d",
@@ -284,7 +298,14 @@ async def dialogue_worker(
         except asyncio.CancelledError:
             log.info("dialogue_worker: cancelled, exiting")
             raise
-        except Exception:
+        except Exception as e:
+            msg = str(e).lower()
+            if "llm gateway" in msg or "chat/completions" in msg:
+                record_dialogue_error(sim, kind="llm")
+            elif "axl" in msg or "transport" in msg:
+                record_dialogue_error(sim, kind="transport")
+            else:
+                record_dialogue_error(sim, kind="unknown")
             log.exception("dialogue_worker: error in iteration; continuing")
 
 

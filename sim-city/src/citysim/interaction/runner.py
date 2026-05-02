@@ -14,11 +14,13 @@ locally. The transcript itself is unaffected.
 from __future__ import annotations
 
 import random
+import re
 import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+import logging
 
 from citysim.llm import LLMMessage, get_gateway
 from citysim.product import ProductBrief
@@ -34,6 +36,15 @@ from .prompts import (
 )
 from .transport import LocalTransport, Transport
 
+log = logging.getLogger("citysim.interaction.runner")
+_CANNED_PREFIXES = (
+    "absolutely",
+    "of course",
+    "certainly",
+    "no problem",
+    "sure thing",
+    "here are",
+)
 
 # Establishments that make sense for a customer-facing buyer dialogue.
 # Office / school / hospital / police are skipped — those are workplaces or
@@ -131,6 +142,7 @@ def run_dialogue(
     arm: str = "random",
     targeted: bool = False,
     transport: Transport | None = None,
+    transport_required: bool = False,
 ) -> DialogueResult:
     """Run one buyer-seller dialogue. Returns the transcript + outcome.
 
@@ -155,7 +167,6 @@ def run_dialogue(
     t0 = time.monotonic()
     agent_gw = get_gateway(tier="agent")
     transport = transport or LocalTransport()
-    _ = transport
 
     is_product_dialogue = product is not None and product.category == est.kind.value
     active_product = product if is_product_dialogue else None
@@ -195,6 +206,52 @@ def run_dialogue(
             except Exception:
                 pass
 
+    def _relay_or_raise(sender: Persona, receiver: Persona, text: str) -> None:
+        payload = f"{dialogue_id}|{sender.agent_id}|{receiver.agent_id}|{text}"
+        try:
+            route = transport.send(sender, receiver, payload)
+            log.debug(
+                "transport send ok dialogue_id=%s sender=%s receiver=%s route=%s",
+                dialogue_id,
+                sender.agent_id,
+                receiver.agent_id,
+                route,
+            )
+        except Exception as e:
+            if transport_required:
+                raise
+            log.warning(
+                "transport send failed (fallback local dialogue) dialogue_id=%s sender=%s receiver=%s err=%s",
+                dialogue_id,
+                sender.agent_id,
+                receiver.agent_id,
+                e,
+            )
+
+    def _normalize_turn(text: str) -> str:
+        s = " ".join((text or "").strip().split())
+        if not s:
+            return "Okay."
+        s = re.sub(r"(?m)^\s*[-*]\s+", "", s)
+        s = re.sub(r"(?m)^\s*\d+[.)]\s+", "", s)
+        lowered = s.lower()
+        for pref in _CANNED_PREFIXES:
+            if lowered.startswith(pref + "!") or lowered.startswith(pref + ".") or lowered.startswith(pref + ","):
+                s = s[len(pref) :].lstrip("!.,:; ").strip()
+                break
+        parts = re.split(r"(?<=[.!?])\s+", s)
+        s = " ".join(p for p in parts if p)[:220].strip()
+        if not s:
+            return "Okay."
+        return s
+
+    def _too_similar(a: str, b: str) -> bool:
+        if not a or not b:
+            return False
+        a_n = re.sub(r"\W+", "", a.lower())
+        b_n = re.sub(r"\W+", "", b.lower())
+        return a_n == b_n
+
     # Fire dialogue_started up front so the UI can render an empty card.
     if on_event is not None:
         try:
@@ -229,14 +286,16 @@ def run_dialogue(
     seller_history.append(LLMMessage(role="assistant", content=greeting))
     buyer_history.append(LLMMessage(role="user", content=greeting))
     opening = DialogueTurn(speaker="seller", text=greeting)
+    _relay_or_raise(seller, buyer, greeting)
     result.turns.append(opening)
     _emit_turn(opening)
 
     end_reason = "max_turns"
     for _ in range(max_turns):
         # ---- Buyer's turn -------------------------------------------------
-        resp = agent_gw.chat(buyer_history, max_tokens=120, temperature=0.85)
-        buyer_text = resp.text.strip()
+        resp = agent_gw.chat(buyer_history, max_tokens=64, temperature=0.45)
+        buyer_text = _normalize_turn(resp.text)
+        _relay_or_raise(buyer, seller, buyer_text)
         turn = DialogueTurn(speaker="buyer", text=buyer_text)
         result.turns.append(turn)
         _emit_turn(turn)
@@ -251,13 +310,22 @@ def run_dialogue(
             break
 
         # ---- Seller's turn ------------------------------------------------
-        resp = agent_gw.chat(seller_history, max_tokens=120, temperature=0.7)
-        seller_text = resp.text.strip()
+        resp = agent_gw.chat(seller_history, max_tokens=72, temperature=0.35)
+        seller_text = _normalize_turn(resp.text)
+        _relay_or_raise(seller, buyer, seller_text)
         turn = DialogueTurn(speaker="seller", text=seller_text)
         result.turns.append(turn)
         _emit_turn(turn)
         seller_history.append(LLMMessage(role="assistant", content=seller_text))
         buyer_history.append(LLMMessage(role="user", content=seller_text))
+
+        # Stop loop if both sides start parroting near-identical turns.
+        if len(result.turns) >= 4:
+            last = result.turns[-1].text
+            prev_same = result.turns[-3].text
+            if _too_similar(last, prev_same):
+                end_reason = "leave"
+                break
 
     result.end_reason = end_reason
     result.duration_s = time.monotonic() - t0

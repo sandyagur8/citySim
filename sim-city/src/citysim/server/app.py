@@ -17,9 +17,11 @@ import asyncio
 import json
 import logging
 import os
+import http
 from contextlib import asynccontextmanager
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -132,10 +134,94 @@ def create_app(
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/api/health/deps")
+    async def health_deps() -> dict[str, Any]:
+        out: dict[str, Any] = {"status": "ok", "deps": {}}
+
+        llm_provider = os.environ.get("CITYSIM_LLM_PROVIDER", "ollama-openai").strip().lower()
+        if llm_provider == "ollama-openai":
+            base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/")
+            tags_url = base.removesuffix("/v1") + "/api/tags"
+            try:
+                async with httpx.AsyncClient(timeout=2.0) as client:
+                    resp = await client.get(tags_url)
+                ok = resp.status_code == http.HTTPStatus.OK
+                out["deps"]["ollama"] = {"ok": ok, "url": tags_url, "status_code": resp.status_code}
+                if not ok:
+                    out["status"] = "degraded"
+            except Exception as e:  # noqa: BLE001
+                out["deps"]["ollama"] = {"ok": False, "url": tags_url, "error": str(e)}
+                out["status"] = "degraded"
+
+        if os.environ.get("CITYSIM_TRANSPORT", "local").strip().lower() == "axl":
+            for node, port_env in (("nodeA", "CITYSIM_AXL_NODE_A_PORT"), ("nodeB", "CITYSIM_AXL_NODE_B_PORT")):
+                port = int(os.environ.get(port_env, "9002" if node == "nodeA" else "9012"))
+                url = f"http://127.0.0.1:{port}/topology"
+                try:
+                    async with httpx.AsyncClient(timeout=2.0) as client:
+                        resp = await client.get(url)
+                    ok = resp.status_code == http.HTTPStatus.OK
+                    out["deps"][node] = {"ok": ok, "url": url, "status_code": resp.status_code}
+                    if not ok:
+                        out["status"] = "degraded"
+                except Exception as e:  # noqa: BLE001
+                    out["deps"][node] = {"ok": False, "url": url, "error": str(e)}
+                    out["status"] = "degraded"
+        return out
+
     @app.get("/api/world")
     async def world() -> dict[str, Any]:
         sim = sim_holder["sim"]
         return init_payload(sim)
+
+    @app.get("/api/agent/by-ens/{ens_name:path}")
+    async def agent_by_ens(ens_name: str) -> dict[str, Any]:
+        sim = sim_holder.get("sim")
+        if sim is None or sim.persona_store is None:
+            raise HTTPException(status_code=503, detail="Sim not ready")
+
+        query = ens_name.strip()
+        if not query:
+            raise HTTPException(status_code=400, detail="ENS name required")
+
+        row = sim.persona_store.get_by_ens_name(query)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"No agent found for ENS: {query}")
+
+        est = None
+        if row.employer_id:
+            est = next((e for e in sim.establishments if e.id == row.employer_id), None)
+
+        return {
+            "agent_id": row.agent_id,
+            "ens_name": row.ens_name,
+            "ens_status": row.ens_status,
+            "wallet_address": row.wallet_address,
+            "axl_key": row.axl_key,
+            "demographics": {
+                "age": row.age,
+                "gender": row.gender,
+                "education": row.education,
+                "income_band": row.income_band,
+                "occupation": row.occupation,
+                "household_role": row.household_role,
+            },
+            "home_cell": [row.home_x, row.home_y],
+            "work_cell": [row.work_x, row.work_y] if row.work_x is not None and row.work_y is not None else None,
+            "card_text": row.card_text,
+            "prefs": row.prefs,
+            "needs": row.needs,
+            "establishment": (
+                {
+                    "id": est.id,
+                    "kind": est.kind.value,
+                    "cell": [est.cell[0], est.cell[1]],
+                    "name": f"{est.kind.value.replace('_', ' ').title()} {est.id}",
+                }
+                if est is not None
+                else None
+            ),
+        }
 
     # ---------- Product brief CRUD ----------
 
