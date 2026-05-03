@@ -22,7 +22,7 @@ import {
   AmbientLight,
   DirectionalLight,
 } from '@deck.gl/core';
-import { PolygonLayer, ScatterplotLayer, ColumnLayer } from '@deck.gl/layers';
+import { PolygonLayer, ScatterplotLayer, ColumnLayer, TextLayer } from '@deck.gl/layers';
 
 import type { AgentDict, EstablishmentDict, GridDict } from '../lib/types';
 import { ACTIVITY } from '../lib/types';
@@ -60,6 +60,40 @@ type Props = {
 function isCommuting(act: number): boolean {
   return act === ACTIVITY.COMMUTE;
 }
+
+// Per-establishment-kind glyph rendered as a floating sign above the building.
+// Read at a glance: ☕ marks coffee shops, 🍺 pubs, 🛒 supermarkets, etc.
+const KIND_ICON: Record<string, string> = {
+  coffee_shop: '☕',
+  pub: '🍺',
+  restaurant: '🍽️',
+  supermarket: '🛒',
+  hardware: '🔧',
+  pharmacy: '💊',
+  clothing: '👕',
+  bank: '💼',
+  hospital: '🏥',
+  school: '🏫',
+  police: '🚓',
+  office: '🏢',
+  park: '🌳',
+};
+
+// Kind-specific text colour for the sign so the type is also encoded in hue.
+const KIND_SIGN_COLOR: Record<string, [number, number, number]> = {
+  coffee_shop: [255, 200, 130],
+  pub: [255, 170, 90],
+  restaurant: [255, 140, 140],
+  supermarket: [120, 220, 160],
+  hardware: [220, 180, 120],
+  pharmacy: [120, 230, 170],
+  clothing: [240, 150, 220],
+  bank: [180, 200, 240],
+  hospital: [255, 170, 170],
+  school: [220, 220, 140],
+  police: [150, 180, 255],
+  office: [200, 220, 240],
+};
 
 export function CityView({
   grid,
@@ -118,14 +152,16 @@ export function CityView({
   // Camera — auto-fit zoom so the whole city is visible at any grid size
   // -------------------------------------------------------------------------
   const initialViewState = useMemo(() => {
-    const zoom = Math.max(1.5, Math.min(4.5, 9 - Math.log2(grid.size)));
+    // Pull the camera in tighter so the city fills the viewport and feels
+    // dense. The previous formula left a lot of empty viewport at zoom-out.
+    const zoom = Math.max(2.4, Math.min(5.2, 10 - Math.log2(grid.size)));
     return {
       target: [grid.size / 2, grid.size / 2, 0] as [number, number, number],
       rotationX: 55,
       rotationOrbit: 30,
       zoom,
-      minZoom: 0.5,
-      maxZoom: 8,
+      minZoom: 1.2,
+      maxZoom: 9,
     };
   }, [grid.size]);
 
@@ -186,7 +222,13 @@ export function CityView({
       filled: true,
       extruded: false,
       getPolygon: (r) => r.poly,
-      getFillColor: [38, 38, 42, 255],
+      getFillColor: (r) => {
+        // Three-tier palette so the city reads as a real road network:
+        // major = dark asphalt, minor = lighter grey, sidewalk = pale.
+        if (r.kind === 'major') return [28, 28, 32, 255];
+        if (r.kind === 'minor') return [50, 50, 56, 255];
+        return [180, 178, 170, 220]; // sidewalk
+      },
       getElevation: 0.02,
     }),
 
@@ -213,6 +255,75 @@ export function CityView({
       getElevation: (t) => t.height * 0.55,
       getFillColor: (t) => [t.canopyColor[0], t.canopyColor[1], t.canopyColor[2], 255],
       material: { ambient: 0.5, diffuse: 0.7, shininess: 8, specularColor: [40, 60, 40] },
+    }),
+
+    // Night-time neon glow under each shop sign — hidden during the day,
+    // pops at dusk to read as the city "lighting up". Two stacked
+    // ScatterplotLayers (a wide soft halo plus a tighter bright core)
+    // give a cheap fake-bloom that scales nicely at low zoom.
+    new ScatterplotLayer<Building>({
+      id: 'shop-glow-halo',
+      data: buildings.filter((b) => b.est !== null),
+      pickable: false,
+      stroked: false,
+      filled: true,
+      radiusUnits: 'common',
+      getPosition: (b) => [b.x + 0.5, b.y + 0.5, b.height + 0.05],
+      getRadius: 1.6,
+      getFillColor: (b) => {
+        const c = KIND_SIGN_COLOR[b.est!.kind] ?? [240, 240, 240];
+        // Halo only at night (1 - dayMix). Soft edge.
+        const a = Math.round(70 * (1 - dayMix));
+        return [c[0], c[1], c[2], a];
+      },
+      updateTriggers: { getFillColor: dayMix },
+    }),
+    new ScatterplotLayer<Building>({
+      id: 'shop-glow-core',
+      data: buildings.filter((b) => b.est !== null),
+      pickable: false,
+      stroked: false,
+      filled: true,
+      radiusUnits: 'common',
+      getPosition: (b) => [b.x + 0.5, b.y + 0.5, b.height + 0.1],
+      getRadius: 0.55,
+      getFillColor: (b) => {
+        const c = KIND_SIGN_COLOR[b.est!.kind] ?? [240, 240, 240];
+        const a = Math.round(160 * (1 - dayMix));
+        return [c[0], c[1], c[2], a];
+      },
+      updateTriggers: { getFillColor: dayMix },
+    }),
+
+    // Floating shop signs — emoji + kind name above each establishment.
+    // Only real establishments (Building.est != null) get a sign.
+    new TextLayer<Building>({
+      id: 'shop-signs',
+      data: buildings.filter((b) => b.est !== null),
+      getPosition: (b) => [b.x + 0.5, b.y + 0.5, b.height + 0.6],
+      getText: (b) => KIND_ICON[b.est!.kind] ?? '🏪',
+      getSize: 22,
+      sizeUnits: 'pixels',
+      sizeMinPixels: 14,
+      sizeMaxPixels: 30,
+      getColor: (b) => {
+        const c = KIND_SIGN_COLOR[b.est!.kind] ?? [240, 240, 240];
+        return [c[0], c[1], c[2], 235];
+      },
+      background: true,
+      backgroundPadding: [4, 2],
+      getBackgroundColor: () => [10, 10, 14, 180],
+      getBorderColor: () => [40, 40, 50, 220],
+      getBorderWidth: 1,
+      billboard: true,
+      pickable: true,
+      onClick: (info) => {
+        const b = info.object as Building | undefined;
+        onPickEstablishment(b?.est ?? null);
+      },
+      // Re-render when sun moves (legibility tuning) — not strictly needed
+      // but cheap and keeps the layer responsive to lighting.
+      updateTriggers: { getColor: dayMix },
     }),
 
     new PolygonLayer<Building>({
@@ -324,7 +435,9 @@ export function CityView({
         },
       }),
 
-      // Low-zoom dot — keeps people visible when zoomed all the way out
+      // Low-zoom dot — keeps people visible when zoomed all the way out.
+      // Bumped radius + min-pixels so a crowded area reads as a clear smear
+      // of bustle from the wide-angle view.
       new ScatterplotLayer<AgentDict>({
         id: 'people-dots',
         data: agents,
@@ -332,18 +445,53 @@ export function CityView({
         stroked: false,
         filled: true,
         radiusUnits: 'common',
-        radiusMinPixels: 3,
-        radiusMaxPixels: 5,
+        radiusMinPixels: 5,
+        radiusMaxPixels: 9,
         getPosition: (_a, info) => positionFor(info.index, 1.1),
-        getRadius: 0.12,
+        getRadius: 0.18,
         getFillColor: (_a, info) => {
           const code = smoothed.activities[info.index] ?? 0;
           const c = ACTIVITY_COLORS[code] ?? [200, 200, 200];
-          return [c[0], c[1], c[2], 255];
+          // Brighten at night so movement is still legible against the
+          // dark ground / glowing shop signs.
+          const lift = Math.round(40 * (1 - dayMix));
+          return [
+            Math.min(255, c[0] + lift),
+            Math.min(255, c[1] + lift),
+            Math.min(255, c[2] + lift),
+            255,
+          ];
         },
         updateTriggers: {
           getPosition: smoothed,
-          getFillColor: smoothed,
+          getFillColor: [smoothed, dayMix],
+        },
+      }),
+
+      // Activity halo — a faint wider disc behind each agent. Soft
+      // overlapping discs in busy areas merge into "crowd glow" patches,
+      // which is the visual cue for bustle at zoom-out.
+      new ScatterplotLayer<AgentDict>({
+        id: 'people-halos',
+        data: agents,
+        pickable: false,
+        stroked: false,
+        filled: true,
+        radiusUnits: 'common',
+        radiusMinPixels: 4,
+        radiusMaxPixels: 14,
+        getPosition: (_a, info) => positionFor(info.index, 0.3),
+        getRadius: 0.42,
+        getFillColor: (_a, info) => {
+          const code = smoothed.activities[info.index] ?? 0;
+          const c = ACTIVITY_COLORS[code] ?? [200, 200, 200];
+          // Cheap blend toward neon at night, low alpha either way.
+          const alpha = 28 + Math.round(36 * (1 - dayMix));
+          return [c[0], c[1], c[2], alpha];
+        },
+        updateTriggers: {
+          getPosition: smoothed,
+          getFillColor: [smoothed, dayMix],
         },
       }),
     );

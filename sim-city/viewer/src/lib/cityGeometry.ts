@@ -263,34 +263,76 @@ function fillerHeight(
 // cell edges, which already reads as street space against ground tiles.
 // ---------------------------------------------------------------------------
 
-export function buildRoads(grid: GridDict): RoadStrip[] {
-  const size = grid.size;
-  const w = 0.18; // road width, in cell units (centered on cell boundary)
-  const stride = 5;
-  const strips: RoadStrip[] = [];
+export type RoadKind = 'major' | 'minor' | 'sidewalk';
 
-  // Vertical major roads (running along y-axis), at x = stride, 2*stride, ...
-  for (let x = stride; x < size; x += stride) {
+export type RoadStripExt = RoadStrip & { kind: RoadKind };
+
+/**
+ * Three-tier road grid:
+ *  - Major avenues every ``majorStride`` cells (wide, dark asphalt)
+ *  - Minor cross-streets between every block (narrow asphalt)
+ *  - Sidewalks running parallel to majors (light grey)
+ *
+ * The dense network makes the city read as a real grid even at full zoom-out,
+ * and the sidewalks add a satisfying read of "road-then-pavement-then-shop"
+ * along major routes.
+ */
+export function buildRoads(grid: GridDict): RoadStripExt[] {
+  const size = grid.size;
+  const wMajor = 0.32; // wide avenue
+  const wMinor = 0.1; // narrow cross-street
+  const wSide = 0.08; // sidewalk strip flanking majors
+  const majorStride = 5;
+  const strips: RoadStripExt[] = [];
+
+  // Helper: vertical strip at x with given half-width
+  const vstrip = (x: number, hw: number, kind: RoadKind) => {
     strips.push({
       poly: [
-        [x - w / 2, 0],
-        [x + w / 2, 0],
-        [x + w / 2, size],
-        [x - w / 2, size],
+        [x - hw, 0],
+        [x + hw, 0],
+        [x + hw, size],
+        [x - hw, size],
       ],
+      kind,
     });
-  }
-  // Horizontal major roads, at y = stride, 2*stride, ...
-  for (let y = stride; y < size; y += stride) {
+  };
+  const hstrip = (y: number, hw: number, kind: RoadKind) => {
     strips.push({
       poly: [
-        [0, y - w / 2],
-        [size, y - w / 2],
-        [size, y + w / 2],
-        [0, y + w / 2],
+        [0, y - hw],
+        [size, y - hw],
+        [size, y + hw],
+        [0, y + hw],
       ],
+      kind,
     });
+  };
+
+  // Minor cross-streets at every cell boundary that is NOT a major.
+  // Skip x=0 and x=size so we don't draw on the city edge.
+  for (let x = 1; x < size; x++) {
+    if (x % majorStride === 0) continue;
+    vstrip(x, wMinor / 2, 'minor');
   }
+  for (let y = 1; y < size; y++) {
+    if (y % majorStride === 0) continue;
+    hstrip(y, wMinor / 2, 'minor');
+  }
+
+  // Major avenues at multiples of majorStride.
+  for (let x = majorStride; x < size; x += majorStride) {
+    vstrip(x, wMajor / 2, 'major');
+    // Sidewalks flanking the major (on both sides)
+    vstrip(x - wMajor / 2 - wSide / 2, wSide / 2, 'sidewalk');
+    vstrip(x + wMajor / 2 + wSide / 2, wSide / 2, 'sidewalk');
+  }
+  for (let y = majorStride; y < size; y += majorStride) {
+    hstrip(y, wMajor / 2, 'major');
+    hstrip(y - wMajor / 2 - wSide / 2, wSide / 2, 'sidewalk');
+    hstrip(y + wMajor / 2 + wSide / 2, wSide / 2, 'sidewalk');
+  }
+
   return strips;
 }
 

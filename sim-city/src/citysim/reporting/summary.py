@@ -183,17 +183,30 @@ def summarize_day(
     *,
     event_log: EventLog | None = None,
     persona_store: PersonaStore | None = None,
+    product_filter: str | None = None,
+    sim_minute_min: float | None = None,
 ) -> DaySummary:
     """Read the JSONL log for ``day`` and return a structured summary.
 
     If ``persona_store`` is provided, dialogues are also bucketed by buyer
     income band — looked up by ``buyer_id``. Otherwise that section is
     omitted.
+
+    ``product_filter``: when set, product-specific aggregations only count
+    events whose ``product_id`` matches this name. The summary's headline
+    ``product_name`` is also pinned to this value. Used by the run's
+    end-of-day report so a previous run's product can't leak in.
+
+    ``sim_minute_min``: when set, drop events whose ``sim_minute`` is
+    earlier than this. Lets the day-summary scope itself to "this run"
+    when a previous run wrote events for the same sim-day.
     """
     log_ = event_log or EventLog()
     events = log_.read_day(day)
 
     summary = DaySummary(day=day)
+    if product_filter:
+        summary.product_name = product_filter
     decisive_counter: Counter[str] = Counter()
     establishment_counter: Counter[str] = Counter()
     prices: list[float] = []
@@ -234,6 +247,20 @@ def summarize_day(
     for ev in events:
         if ev.get("kind") != "dialogue":
             continue
+        # Drop events from a prior run when caller scoped us to a window.
+        if sim_minute_min is not None:
+            ev_sm = ev.get("sim_minute")
+            if isinstance(ev_sm, (int, float)) and float(ev_sm) < float(sim_minute_min):
+                continue
+        # When filtering to a single product, drop product-events for any
+        # other product. Generic / baseline events (no product_id) still
+        # count toward the day's overall activity.
+        if product_filter:
+            ev_kind = str(ev.get("dialogue_kind", "generic"))
+            if ev_kind == "product":
+                ev_pid = str(ev.get("product_id") or "")
+                if ev_pid and ev_pid != product_filter:
+                    continue
 
         summary.n_dialogues += 1
         end_reason = str(ev.get("end_reason", ""))
@@ -281,6 +308,9 @@ def summarize_day(
         if dialogue_kind == "product":
             summary.n_product_dialogues += 1
             product_id = ev.get("product_id")
+            # When no caller-supplied product_filter is given, fall back
+            # to the legacy "first event wins" behaviour. With a filter,
+            # product_name was pinned at the top of the function.
             if product_id and not summary.product_name:
                 summary.product_name = str(product_id)
 
@@ -514,10 +544,208 @@ def format_summary(summary: DaySummary) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Multi-day run summary
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RunSummary:
+    """Cumulative summary of a multi-day simulation run.
+
+    Aggregates ``DaySummary`` rows across the run's day range, producing
+    headline KPIs, day-over-day trends, and merged top-N lists. Powers
+    the end-of-run RunReportModal in the viewer.
+    """
+
+    start_day: int
+    end_day: int  # exclusive: range covers [start_day, end_day)
+    days: list[DaySummary] = field(default_factory=list)
+
+    # Cumulative headline KPIs
+    n_dialogues: int = 0
+    n_purchases: int = 0
+    n_product_dialogues: int = 0
+    n_units_sold: int = 0
+    product_revenue: float = 0.0
+
+    # Merged top-N (across all days)
+    product_name: str | None = None
+    top_intrinsic_motivators: list[tuple[str, int]] = field(default_factory=list)
+    top_winning_phrases: list[tuple[str, int]] = field(default_factory=list)
+    top_objections: list[tuple[str, int]] = field(default_factory=list)
+    top_decisive_factors: list[tuple[str, int]] = field(default_factory=list)
+    by_kind: dict[str, SegmentStats] = field(default_factory=dict)
+    by_income_band: dict[str, SegmentStats] = field(default_factory=dict)
+    by_age_band: dict[str, SegmentStats] = field(default_factory=dict)
+    arm_random: SegmentStats = field(
+        default_factory=lambda: SegmentStats(label="random")
+    )
+    arm_targeted: SegmentStats = field(
+        default_factory=lambda: SegmentStats(label="targeted")
+    )
+
+    @property
+    def conversion(self) -> float:
+        return self.n_purchases / self.n_dialogues if self.n_dialogues else 0.0
+
+    @property
+    def product_conversion(self) -> float:
+        return (
+            self.n_units_sold / self.n_product_dialogues
+            if self.n_product_dialogues
+            else 0.0
+        )
+
+    @property
+    def has_product(self) -> bool:
+        return self.n_product_dialogues > 0
+
+    def to_dict(self) -> dict[str, object]:
+        def seg(s: SegmentStats) -> dict[str, object]:
+            return {
+                "label": s.label,
+                "count": s.count,
+                "purchases": s.purchases,
+                "conversion": s.conversion,
+            }
+
+        return {
+            "start_day": self.start_day,
+            "end_day": self.end_day,
+            "days_count": len(self.days),
+            "days": [d.to_dict() for d in self.days],
+            "n_dialogues": self.n_dialogues,
+            "n_purchases": self.n_purchases,
+            "conversion": self.conversion,
+            "n_product_dialogues": self.n_product_dialogues,
+            "n_units_sold": self.n_units_sold,
+            "product_revenue": self.product_revenue,
+            "product_conversion": self.product_conversion,
+            "has_product": self.has_product,
+            "product_name": self.product_name,
+            "top_intrinsic_motivators": list(self.top_intrinsic_motivators),
+            "top_winning_phrases": list(self.top_winning_phrases),
+            "top_objections": list(self.top_objections),
+            "top_decisive_factors": list(self.top_decisive_factors),
+            "by_kind": {k: seg(v) for k, v in self.by_kind.items()},
+            "by_income_band": {k: seg(v) for k, v in self.by_income_band.items()},
+            "by_age_band": {k: seg(v) for k, v in self.by_age_band.items()},
+            "arm_random": seg(self.arm_random),
+            "arm_targeted": seg(self.arm_targeted),
+            # Day-over-day trend table (cheap timeseries for charting)
+            "trend": [
+                {
+                    "day": d.day,
+                    "n_dialogues": d.n_dialogues,
+                    "n_purchases": d.n_purchases,
+                    "n_product_dialogues": d.n_product_dialogues,
+                    "n_units_sold": d.n_units_sold,
+                    "product_revenue": d.product_revenue,
+                    "conversion": d.conversion,
+                    "product_conversion": d.product_conversion,
+                }
+                for d in self.days
+            ],
+        }
+
+
+def summarize_run(
+    *,
+    start_day: int,
+    end_day: int,
+    event_log: EventLog | None = None,
+    persona_store: PersonaStore | None = None,
+    product_filter: str | None = None,
+    start_sim_minute: float | None = None,
+) -> RunSummary:
+    """Aggregate per-day summaries across the half-open range [start_day, end_day).
+
+    Used by the end-of-run report. Re-reads the JSONL log for each day
+    rather than caching in-memory — keeps the source of truth on disk.
+
+    ``product_filter``: pin the report to a single product name so a
+    previous run's product doesn't bleed in.
+
+    ``start_sim_minute``: when paired with start_day, drops events from
+    the first day that occurred before the run started.
+    """
+    days: list[DaySummary] = []
+    for day in range(start_day, end_day + 1):
+        try:
+            min_sm: float | None = None
+            if start_sim_minute is not None and day == start_day:
+                min_sm = start_sim_minute
+            ds = summarize_day(
+                day,
+                event_log=event_log,
+                persona_store=persona_store,
+                product_filter=product_filter,
+                sim_minute_min=min_sm,
+            )
+        except Exception:
+            continue
+        if ds.n_dialogues == 0:
+            continue
+        days.append(ds)
+
+    rs = RunSummary(start_day=start_day, end_day=end_day + 1, days=days)
+    if product_filter:
+        rs.product_name = product_filter
+
+    motivator_c: Counter[str] = Counter()
+    phrase_c: Counter[str] = Counter()
+    objection_c: Counter[str] = Counter()
+    decisive_c: Counter[str] = Counter()
+
+    for d in days:
+        rs.n_dialogues += d.n_dialogues
+        rs.n_purchases += d.n_purchases
+        rs.n_product_dialogues += d.n_product_dialogues
+        rs.n_units_sold += d.n_units_sold
+        rs.product_revenue += d.product_revenue
+        if not rs.product_name and d.product_name:
+            rs.product_name = d.product_name
+
+        for kv, n in d.top_intrinsic_motivators:
+            motivator_c[kv] += n
+        for kv, n in d.top_winning_phrases:
+            phrase_c[kv] += n
+        for kv, n in d.top_objections:
+            objection_c[kv] += n
+        for kv, n in d.top_decisive_factors:
+            decisive_c[kv] += n
+
+        for k, s in d.by_kind.items():
+            agg = rs.by_kind.setdefault(k, SegmentStats(label=k))
+            agg.count += s.count
+            agg.purchases += s.purchases
+        for k, s in d.by_income_band.items():
+            agg = rs.by_income_band.setdefault(k, SegmentStats(label=k))
+            agg.count += s.count
+            agg.purchases += s.purchases
+        for k, s in d.by_age_band.items():
+            agg = rs.by_age_band.setdefault(k, SegmentStats(label=k))
+            agg.count += s.count
+            agg.purchases += s.purchases
+        rs.arm_random.count += d.arm_random.count
+        rs.arm_random.purchases += d.arm_random.purchases
+        rs.arm_targeted.count += d.arm_targeted.count
+        rs.arm_targeted.purchases += d.arm_targeted.purchases
+
+    rs.top_intrinsic_motivators = motivator_c.most_common(8)
+    rs.top_winning_phrases = phrase_c.most_common(8)
+    rs.top_objections = objection_c.most_common(8)
+    rs.top_decisive_factors = decisive_c.most_common(8)
+    return rs
+
+
 __all__ = [
     "DaySummary",
     "RelevantPersona",
+    "RunSummary",
     "SegmentStats",
     "format_summary",
     "summarize_day",
+    "summarize_run",
 ]

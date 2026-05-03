@@ -201,6 +201,12 @@ async def dialogue_worker(
                 continue
             if sim.paused:
                 continue
+            # Hard gate: only fire dialogues while a run is active.
+            # When the user hits Pause / End / Reset from the UI, the
+            # status flips and we stop emitting new dialogues here even
+            # if the worker hasn't been cancelled yet.
+            if sim.run.status != "running":
+                continue
 
             # Hot-reload the brief if product.json has changed on disk.
             try:
@@ -231,7 +237,19 @@ async def dialogue_worker(
             iteration += 1
 
             # ---------- Decide arm + store + buyer ----------
-            brief = rng.choice(products) if products else None
+            # If a run is active and locked to a specific product, only fire
+            # dialogues for that product. Avoids the worker bouncing between
+            # everything in the library when the user explicitly chose one.
+            locked_name = (
+                sim.run.config.product_name
+                if sim.run.status == "running"
+                else None
+            )
+            if locked_name:
+                eligible = [p for p in products if p.name == locked_name]
+            else:
+                eligible = products
+            brief = rng.choice(eligible) if eligible else None
             if brief is not None:
                 # Decide whether THIS dialogue is product or baseline-generic.
                 run_baseline = rng.random() < baseline_ratio
@@ -275,12 +293,21 @@ async def dialogue_worker(
             sim_minute = sim.sim_minute
             day = sim.day_of_year
 
+            # When a run is active, the wizard's max_turns overrides the
+            # env default. Lets users tune dialogue depth per run without
+            # restarting the backend.
+            run_turns = (
+                int(sim.run.config.max_turns)
+                if sim.run.status == "running"
+                else actual_turns
+            )
+
             await asyncio.to_thread(
                 run_dialogue,
                 buyer,
                 seller,
                 est,
-                max_turns=actual_turns,
+                max_turns=max(1, run_turns),
                 extract_outcome=extract_outcome,
                 log_to=event_log,
                 sim_minute=sim_minute,

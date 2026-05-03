@@ -118,13 +118,22 @@ export const FILLER_COLORS: Record<number, RGB[]> = {
 };
 
 // Civic / institutional kinds that override their zone color so they read
-// as their own identity (hospital, school, police, bank).
+// as their own identity (hospital, school, police, bank). Plus shoppable
+// kinds get bespoke hues so the skyline is legible at a glance — coffee
+// brown, pub amber, supermarket red, pharmacy green, etc.
 export const KIND_OVERRIDE_COLOR: Record<string, RGB> = {
   hospital: [240, 245, 252], // off-white
   school: [180, 70, 65],     // brick red — distinct from residential warmth
   police: [40, 60, 110],     // navy
   bank: [220, 200, 145],     // cream / gold
   park: [80, 140, 70],
+  coffee_shop: [120, 70, 40],   // espresso brown
+  pub: [180, 100, 50],          // amber
+  restaurant: [190, 70, 60],    // tomato
+  supermarket: [220, 70, 70],   // pillarbox red
+  hardware: [150, 110, 70],     // toolbox tan
+  pharmacy: [60, 160, 110],     // pharmacy green
+  clothing: [200, 90, 170],     // boutique pink
 };
 
 // ---------------------------------------------------------------------------

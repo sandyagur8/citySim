@@ -2,7 +2,15 @@
 // The WebSocket already pushes live state — these are only used to
 // initialise / mutate the product brief from the GUI.
 
-import type { DaySummaryDict, EnsAgentLookup, ProductBriefDict } from './types';
+import type {
+  DaySummaryDict,
+  EnsAgentLookup,
+  OllamaModel,
+  ProductBriefDict,
+  RunSummaryDict,
+  SimRunDict,
+  SimulationConfigDict,
+} from './types';
 
 // Empty base = relative URLs go through Vite's dev proxy in dev and the
 // same-origin FastAPI app in prod. Set window.__CITYSIM_API_BASE__ in
@@ -149,5 +157,89 @@ export function emptyProductBrief(): ProductBriefDict {
     key_features: [],
     positioning: 'mainstream',
     currency: 'USD',
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Simulation lifecycle
+// ---------------------------------------------------------------------------
+
+export async function startSimulation(
+  config: Partial<SimulationConfigDict>,
+): Promise<{ run: SimRunDict; active_workers: number }> {
+  const res = await fetch(`${base}/api/simulation/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => res.statusText);
+    throw new Error(`HTTP ${res.status}: ${detail}`);
+  }
+  return (await res.json()) as { run: SimRunDict; active_workers: number };
+}
+
+export async function stopSimulation(): Promise<{ run: SimRunDict }> {
+  const res = await fetch(`${base}/api/simulation/stop`, { method: 'POST' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as { run: SimRunDict };
+}
+
+export async function pauseSimulation(): Promise<{ run: SimRunDict; paused: boolean }> {
+  const res = await fetch(`${base}/api/simulation/pause`, { method: 'POST' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as { run: SimRunDict; paused: boolean };
+}
+
+export async function resumeSimulation(): Promise<{ run: SimRunDict; paused: boolean }> {
+  const res = await fetch(`${base}/api/simulation/resume`, { method: 'POST' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as { run: SimRunDict; paused: boolean };
+}
+
+export async function resetSimulation(): Promise<{ run: SimRunDict }> {
+  const res = await fetch(`${base}/api/simulation/reset`, { method: 'POST' });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as { run: SimRunDict };
+}
+
+export async function fetchSimulationStatus(): Promise<{
+  run: SimRunDict;
+  last_run_summary: RunSummaryDict | null;
+}> {
+  const res = await fetch(`${base}/api/simulation/status`);
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return (await res.json()) as {
+    run: SimRunDict;
+    last_run_summary: RunSummaryDict | null;
+  };
+}
+
+export async function fetchRunSummary(): Promise<RunSummaryDict | null> {
+  const res = await fetch(`${base}/api/run-summary`);
+  return jsonOrNull<RunSummaryDict>(res);
+}
+
+export async function fetchModels(): Promise<{
+  models: OllamaModel[];
+  current: string | null;
+}> {
+  const res = await fetch(`${base}/api/models`);
+  if (!res.ok) {
+    return { models: [], current: null };
+  }
+  return (await res.json()) as { models: OllamaModel[]; current: string | null };
+}
+
+export function defaultSimulationConfig(): SimulationConfigDict {
+  return {
+    product_name: null,
+    total_days: 1,
+    agent_cap: null,
+    baseline_ratio: 0.25,
+    model: null,
+    dialogue_workers: 1,
+    target_dialogues_per_day: 60,
+    max_turns: 6,
   };
 }

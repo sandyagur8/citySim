@@ -9,6 +9,8 @@ import type { DialogueCard } from '../lib/types';
 
 type Props = {
   dialogues: DialogueCard[];
+  /** Click "Open scene" → bubble the card up to App, which mounts ConversationScene. */
+  onOpenScene?: (card: DialogueCard) => void;
 };
 
 function fmtMin(simMinute: number | undefined): string {
@@ -29,7 +31,7 @@ function badgeFor(card: DialogueCard) {
   return { text: 'PASS', cls: 'bg-neutral-700/40 text-neutral-400 border-neutral-700' };
 }
 
-export function DialogueFeed({ dialogues }: Props) {
+export function DialogueFeed({ dialogues, onOpenScene }: Props) {
   const [expanded, setExpanded] = useState<string | null>(null);
 
   return (
@@ -56,7 +58,7 @@ export function DialogueFeed({ dialogues }: Props) {
             const motiv = card.outcome?.intrinsic_motivator;
             const winning = card.outcome?.seller_winning_phrase;
             return (
-              <div key={card.dialogue_id} className="bg-neutral-900">
+              <div key={card.dialogue_id} className="bg-neutral-900 group/row relative">
                 <button
                   type="button"
                   onClick={() => setExpanded(isOpen ? null : card.dialogue_id)}
@@ -99,6 +101,19 @@ export function DialogueFeed({ dialogues }: Props) {
                     </div>
                   </div>
                 </button>
+                {onOpenScene && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenScene(card);
+                    }}
+                    className="absolute top-2 right-2 px-2 py-0.5 rounded bg-emerald-700/40 hover:bg-emerald-600/60 text-emerald-200 text-[10px] border border-emerald-700 opacity-0 group-hover/row:opacity-100 transition-opacity"
+                    title="Open conversation scene"
+                  >
+                    🎬 Open
+                  </button>
+                )}
 
                 {isOpen && (
                   <div className="px-4 pb-3 pt-1 bg-neutral-950/40 border-t border-neutral-800/50">

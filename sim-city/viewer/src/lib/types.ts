@@ -185,6 +185,66 @@ export type DaySummaryDict = {
 };
 
 // ---------------------------------------------------------------------------
+// Simulation run lifecycle (mirrors SimRun + SimulationConfig in sim.py)
+// ---------------------------------------------------------------------------
+
+export type SimulationConfigDict = {
+  product_name: string | null;
+  total_days: number;
+  agent_cap: number | null;
+  baseline_ratio: number;
+  model: string | null;
+  dialogue_workers: number;
+  target_dialogues_per_day: number;
+  max_turns: number;
+};
+
+export type SimRunDict = {
+  status: 'idle' | 'running' | 'completed';
+  config: SimulationConfigDict;
+  start_day: number;
+  days_completed: number;
+  dialogues_today: number;
+};
+
+export type RunSummaryDict = {
+  start_day: number;
+  end_day: number;
+  days_count: number;
+  days: DaySummaryDict[];
+  n_dialogues: number;
+  n_purchases: number;
+  conversion: number;
+  n_product_dialogues: number;
+  n_units_sold: number;
+  product_revenue: number;
+  product_conversion: number;
+  has_product: boolean;
+  product_name: string | null;
+  top_intrinsic_motivators: [string, number][];
+  top_winning_phrases: [string, number][];
+  top_objections: [string, number][];
+  top_decisive_factors: [string, number][];
+  by_kind: Record<string, SegmentDict>;
+  by_income_band: Record<string, SegmentDict>;
+  by_age_band: Record<string, SegmentDict>;
+  arm_random: SegmentDict;
+  arm_targeted: SegmentDict;
+  trend: {
+    day: number;
+    n_dialogues: number;
+    n_purchases: number;
+    n_product_dialogues: number;
+    n_units_sold: number;
+    product_revenue: number;
+    conversion: number;
+    product_conversion: number;
+  }[];
+};
+
+export type OllamaModel = { name: string; size: number | null };
+
+// ---------------------------------------------------------------------------
 // Server -> client messages
 // ---------------------------------------------------------------------------
 
@@ -197,6 +257,8 @@ export type InitMessage = {
   stats: LiveStats;
   recent_dialogues: DialogueCard[];
   last_day_summary: DaySummaryDict | null;
+  run: SimRunDict;
+  last_run_summary: RunSummaryDict | null;
 };
 
 // Each row: [x*1000, y*1000, activity_code]
@@ -207,6 +269,7 @@ export type TickMessage = {
   day_of_week: number;
   positions: number[][];
   stats: LiveStats;
+  run?: SimRunDict;
 };
 
 export type DialogueStartedMessage = {
@@ -264,6 +327,18 @@ export type ProductsUpdatedMessage = {
   products: ProductBriefDict[];
 };
 
+export type SimulationStatusMessage = {
+  type: 'simulation_status';
+  run: SimRunDict;
+  paused?: boolean;
+};
+
+export type SimulationCompletedMessage = {
+  type: 'simulation_completed';
+  run: SimRunDict;
+  summary: RunSummaryDict;
+};
+
 export type ServerMessage =
   | InitMessage
   | TickMessage
@@ -272,7 +347,9 @@ export type ServerMessage =
   | DialogueEndedMessage
   | DaySummaryMessage
   | ProductUpdatedMessage
-  | ProductsUpdatedMessage;
+  | ProductsUpdatedMessage
+  | SimulationStatusMessage
+  | SimulationCompletedMessage;
 
 export type ControlMessage =
   | { type: 'set_speed'; value: number }

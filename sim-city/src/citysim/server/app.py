@@ -38,14 +38,19 @@ from citysim.product import (
     save_product,
     save_products,
 )
-from citysim.reporting import format_summary, summarize_day
+from citysim.reporting import format_summary, summarize_day, summarize_run
 from citysim.server.sim import (
     SimState,
+    SimulationConfig,
     apply_control,
     broadcast,
     build_sim,
+    end_run,
     init_payload,
+    pause_run,
     record_dialogue_event,
+    reset_run,
+    start_run,
     tick_loop,
 )
 
@@ -76,8 +81,11 @@ def create_app(
     max_axl_nodes = 10
 
     async def _reconcile_dialogue_workers(target_count: int) -> None:
+        # ALLOW 0 here. Stopping the simulation needs to fully tear down
+        # the worker pool — clamping to >=1 was the bug that kept new
+        # dialogues firing after the user pressed End.
         nonlocal desired_dialogue_workers
-        desired_dialogue_workers = max(1, target_count)
+        desired_dialogue_workers = max(0, target_count)
         sim = sim_holder.get("sim")
         if sim is None or not auto_dialogue or sim.event_log is None:
             return
@@ -101,11 +109,10 @@ def create_app(
             del dialogue_tasks[desired_dialogue_workers:]
             for t in to_stop:
                 t.cancel()
-            for t in to_stop:
-                try:
-                    await t
-                except (asyncio.CancelledError, Exception):
-                    pass
+            # Don't block on cancellation completing — the scheduler's
+            # hard gate (sim.run.status != "running") already prevents
+            # new dialogues from firing, and asyncio.to_thread can take
+            # a long time to unwind if a worker is mid-LLM-call.
         log.info("Auto-dialogue workers active=%d", len(dialogue_tasks))
 
     # Auto-dialogue is on by default; disable with auto_dialogue=False
@@ -241,9 +248,12 @@ def create_app(
                 loop.call_soon_threadsafe(_apply)
 
             on_event_holder["cb"] = _on_event
+            # Start AXL nodes so they're warm when the user hits Start.
             await _reconcile_axl_nodes(desired_axl_nodes)
-            await _reconcile_dialogue_workers(desired_dialogue_workers)
-            log.info("Auto-dialogue worker pool ready (live event stream enabled)")
+            # Worker pool is NOT spawned here. The simulation boots in
+            # status="idle" — POST /api/simulation/start fires up workers
+            # via _reconcile_dialogue_workers(config.dialogue_workers).
+            log.info("Auto-dialogue ready: idle, awaiting POST /api/simulation/start")
         else:
             log.info("Auto-dialogue worker disabled")
         try:
@@ -609,6 +619,186 @@ def create_app(
         d = summary.to_dict()
         d["text"] = format_summary(summary)
         return d
+
+    # ---------- Simulation lifecycle ----------
+
+    @app.get("/api/simulation/status")
+    async def simulation_status() -> dict[str, Any]:
+        sim = sim_holder.get("sim")
+        if sim is None:
+            raise HTTPException(status_code=503, detail="Sim not ready")
+        return {
+            "run": sim.run.to_dict(),
+            "last_run_summary": sim.run.last_run_summary,
+        }
+
+    @app.post("/api/simulation/start")
+    async def simulation_start(payload: dict[str, Any]) -> dict[str, Any]:
+        sim = sim_holder.get("sim")
+        if sim is None or sim.event_log is None:
+            raise HTTPException(status_code=503, detail="Sim not ready")
+        if sim.run.status == "running":
+            raise HTTPException(
+                status_code=409,
+                detail="Simulation already running. Stop or reset before starting a new one.",
+            )
+
+        try:
+            config = SimulationConfig.from_dict(payload or {})
+        except (ValueError, TypeError, KeyError) as e:
+            raise HTTPException(status_code=400, detail=f"Invalid config: {e}") from e
+
+        # Apply model env override if the user picked one in the wizard.
+        if config.model:
+            os.environ["CITYSIM_OLLAMA_MODEL"] = config.model
+        # Apply baseline ratio for the run (env vars are how the worker
+        # picks it up — the worker re-reads them on each iteration via
+        # _env_float at module load, but our hot-path uses os.environ).
+        os.environ["CITYSIM_BASELINE_RATIO"] = f"{config.baseline_ratio:.4f}"
+        # If a specific product was named, hoist it to the front of the
+        # library so the scheduler's products[0] picks it.
+        if config.product_name:
+            products = load_products()
+            ordered = [p for p in products if p.name == config.product_name] + [
+                p for p in products if p.name != config.product_name
+            ]
+            if ordered:
+                save_products(ordered)
+
+        start_run(sim, config)
+
+        # Spawn workers. _reconcile_dialogue_workers reads on_event_holder["cb"]
+        # which the lifespan already populated.
+        await _reconcile_dialogue_workers(config.dialogue_workers)
+
+        await broadcast(
+            sim,
+            {
+                "type": "simulation_status",
+                "run": sim.run.to_dict(),
+            },
+        )
+        return {
+            "run": sim.run.to_dict(),
+            "active_workers": len(dialogue_tasks),
+        }
+
+    @app.post("/api/simulation/stop")
+    async def simulation_stop() -> dict[str, Any]:
+        """End the run early. Surfaces the cumulative report modal in
+        the viewer (via the simulation_completed broadcast inside
+        end_run/_complete_run) and tears down the worker pool so no
+        further dialogues fire.
+
+        The worker teardown is fired-and-forgotten — the run is marked
+        ``completed`` immediately and the scheduler's hard gate
+        (``sim.run.status == "running"``) blocks new dialogues right
+        away, so we don't need to block this HTTP response on a long
+        in-flight LLM call to finish.
+        """
+        sim = sim_holder.get("sim")
+        if sim is None:
+            raise HTTPException(status_code=503, detail="Sim not ready")
+        # Flip status FIRST so the scheduler stops emitting new
+        # dialogues at the next loop iteration (hard gate in worker).
+        sim.paused = False
+        await end_run(sim)
+        # Now tear down the worker pool in the background. The hard
+        # gate already prevents new dialogues from firing.
+        asyncio.create_task(_reconcile_dialogue_workers(0))
+        return {"run": sim.run.to_dict()}
+
+    @app.post("/api/simulation/pause")
+    async def simulation_pause() -> dict[str, Any]:
+        sim = sim_holder.get("sim")
+        if sim is None:
+            raise HTTPException(status_code=503, detail="Sim not ready")
+        pause_run(sim, True)
+        await broadcast(
+            sim,
+            {
+                "type": "simulation_status",
+                "run": sim.run.to_dict(),
+                "paused": sim.paused,
+            },
+        )
+        return {"run": sim.run.to_dict(), "paused": sim.paused}
+
+    @app.post("/api/simulation/resume")
+    async def simulation_resume() -> dict[str, Any]:
+        sim = sim_holder.get("sim")
+        if sim is None:
+            raise HTTPException(status_code=503, detail="Sim not ready")
+        pause_run(sim, False)
+        await broadcast(
+            sim,
+            {
+                "type": "simulation_status",
+                "run": sim.run.to_dict(),
+                "paused": sim.paused,
+            },
+        )
+        return {"run": sim.run.to_dict(), "paused": sim.paused}
+
+    @app.post("/api/simulation/reset")
+    async def simulation_reset() -> dict[str, Any]:
+        sim = sim_holder.get("sim")
+        if sim is None:
+            raise HTTPException(status_code=503, detail="Sim not ready")
+        reset_run(sim)
+        # Fire-and-forget the worker teardown. The hard gate in the
+        # scheduler (sim.run.status == "running") blocks new dialogues
+        # immediately; we don't need to block on in-flight LLM calls.
+        asyncio.create_task(_reconcile_dialogue_workers(0))
+        await broadcast(sim, {"type": "simulation_status", "run": sim.run.to_dict()})
+        return {"run": sim.run.to_dict()}
+
+    @app.get("/api/run-summary")
+    async def run_summary() -> dict[str, Any]:
+        sim = sim_holder.get("sim")
+        if sim is None or sim.event_log is None:
+            raise HTTPException(status_code=503, detail="Sim not ready")
+        if sim.run.last_run_summary is not None:
+            return sim.run.last_run_summary
+        # Fallback: compute on demand for the current open range
+        end = sim.day_of_year
+        start = sim.run.start_day if sim.run.start_day else max(0, end - 1)
+        rs = summarize_run(
+            start_day=start,
+            end_day=end,
+            event_log=sim.event_log,
+            persona_store=sim.persona_store,
+        )
+        return rs.to_dict()
+
+    @app.get("/api/models")
+    async def list_models() -> dict[str, Any]:
+        """Proxy Ollama's /api/tags so the wizard can populate a dropdown.
+
+        Returns a normalised shape: {"models": [{"name": ..., "size": ...}]}
+        """
+        base = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/")
+        tags_url = base.removesuffix("/v1") + "/api/tags"
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(tags_url)
+            if resp.status_code != http.HTTPStatus.OK:
+                raise HTTPException(status_code=502, detail=f"Ollama returned {resp.status_code}")
+            raw = resp.json()
+            models = [
+                {"name": m.get("name"), "size": m.get("size")}
+                for m in raw.get("models", [])
+                if m.get("name")
+            ]
+            current = os.environ.get("CITYSIM_OLLAMA_MODEL")
+            return {"models": models, "current": current}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not reach Ollama at {tags_url}: {e}",
+            ) from e
 
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:

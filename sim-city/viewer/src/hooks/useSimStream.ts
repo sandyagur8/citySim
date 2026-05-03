@@ -11,7 +11,9 @@ import type {
   DialogueCard,
   LiveStats,
   ProductBriefDict,
+  RunSummaryDict,
   ServerMessage,
+  SimRunDict,
   WorldPayload,
 } from '../lib/types';
 
@@ -40,6 +42,23 @@ export type SmoothedPositions = {
   simMinute: number;
 };
 
+const EMPTY_RUN: SimRunDict = {
+  status: 'idle',
+  config: {
+    product_name: null,
+    total_days: 1,
+    agent_cap: null,
+    baseline_ratio: 0.25,
+    model: null,
+    dialogue_workers: 1,
+    target_dialogues_per_day: 60,
+    max_turns: 6,
+  },
+  start_day: 0,
+  days_completed: 0,
+  dialogues_today: 0,
+};
+
 export type SimStream = {
   connected: boolean;
   world: WorldPayload | null;
@@ -53,6 +72,13 @@ export type SimStream = {
   /** Most recently surfaced summary (modal-trigger). Null after dismissal. */
   pendingSummary: DaySummaryDict | null;
   dismissSummary: () => void;
+  /** Simulation run state (idle / running / completed). */
+  run: SimRunDict;
+  /** Cumulative report broadcast at end-of-run; null until simulation_completed. */
+  runSummary: RunSummaryDict | null;
+  /** Same as runSummary, but cleared on dismiss; drives the RunReportModal. */
+  pendingRunSummary: RunSummaryDict | null;
+  dismissRunSummary: () => void;
   send: (m: ControlMessage) => void;
 };
 
@@ -67,6 +93,9 @@ export function useSimStream(url = '/ws'): SimStream {
   const [recentDialogues, setRecentDialogues] = useState<DialogueCard[]>([]);
   const [daySummary, setDaySummary] = useState<DaySummaryDict | null>(null);
   const [pendingSummary, setPendingSummary] = useState<DaySummaryDict | null>(null);
+  const [run, setRun] = useState<SimRunDict>(EMPTY_RUN);
+  const [runSummary, setRunSummary] = useState<RunSummaryDict | null>(null);
+  const [pendingRunSummary, setPendingRunSummary] = useState<RunSummaryDict | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -96,6 +125,7 @@ export function useSimStream(url = '/ws'): SimStream {
   }, []);
 
   const dismissSummary = useCallback(() => setPendingSummary(null), []);
+  const dismissRunSummary = useCallback(() => setPendingRunSummary(null), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -142,6 +172,8 @@ export function useSimStream(url = '/ws'): SimStream {
           setStats(msg.stats ?? EMPTY_STATS);
           setRecentDialogues(msg.recent_dialogues ?? []);
           setDaySummary(msg.last_day_summary);
+          setRun(msg.run ?? EMPTY_RUN);
+          setRunSummary(msg.last_run_summary ?? null);
           // Don't auto-pop the modal on connect — the user already saw it.
           speedRef.current = msg.clock.speed_multiplier;
           // Initialise samples from current world (everyone at home)
@@ -172,6 +204,7 @@ export function useSimStream(url = '/ws'): SimStream {
             currSampleRef.current ?? { pos, act, min: msg.sim_minute, t };
           currSampleRef.current = { pos, act, min: msg.sim_minute, t };
           if (msg.stats) setStats(msg.stats);
+          if (msg.run) setRun(msg.run);
           setClock((c) =>
             c
               ? {
@@ -240,8 +273,29 @@ export function useSimStream(url = '/ws'): SimStream {
           setProduct(msg.product);
           setProducts(msg.product ? [msg.product] : []);
         } else if (msg.type === 'products_updated') {
-          setProducts(msg.products ?? []);
-          setProduct((msg.products && msg.products.length > 0) ? msg.products[0] : null);
+          // Refresh the library, but DO NOT auto-switch the displayed
+          // "product under test". The user explicitly chose one in the
+          // wizard (or via the edit modal); adding a new product to the
+          // library shouldn't yank that out from under them.
+          const list = msg.products ?? [];
+          setProducts(list);
+          setProduct((current) => {
+            // Keep the current selection if it still exists in the list.
+            if (current && list.some((p) => p.name === current.name)) {
+              return current;
+            }
+            // If nothing is selected yet, fall back to the first item.
+            return list.length > 0 ? list[0] : null;
+          });
+        } else if (msg.type === 'simulation_status') {
+          setRun(msg.run);
+          if (typeof msg.paused === 'boolean') {
+            setClock((c) => (c ? { ...c, paused: msg.paused as boolean } : c));
+          }
+        } else if (msg.type === 'simulation_completed') {
+          setRun(msg.run);
+          setRunSummary(msg.summary);
+          setPendingRunSummary(msg.summary);
         }
       };
     }
@@ -291,18 +345,30 @@ export function useSimStream(url = '/ws'): SimStream {
     if (clock) speedRef.current = clock.speed_multiplier;
   }, [clock?.speed_multiplier]);
 
+  // While a run is active, surface the brief that's locked to the run
+  // rather than whatever the user last clicked. Falls back to `product`
+  // if the run's product can't be resolved (shouldn't happen in practice).
+  const effectiveProduct =
+    run.status === 'running' && run.config.product_name
+      ? products.find((p) => p.name === run.config.product_name) ?? product
+      : product;
+
   return {
     connected,
     world,
     clock,
     smoothed,
-    product,
+    product: effectiveProduct,
     products,
     stats,
     recentDialogues,
     daySummary,
     pendingSummary,
     dismissSummary,
+    run,
+    runSummary,
+    pendingRunSummary,
+    dismissRunSummary,
     send,
   };
 }
