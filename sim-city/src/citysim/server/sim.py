@@ -406,6 +406,32 @@ def record_dialogue_event(sim: SimState, event: dict[str, Any]) -> None:
                 bucket["purchases"] = int(bucket.get("purchases", 0)) + 1
 
 
+async def _pay_daily_wages_async(sim_day: int) -> None:
+    """Background task: hand the day's wage payout to the economy module.
+
+    Gated on the env var ``CITYSIM_DAILY_WAGES`` (default ``1``). Best
+    effort — never raises into the tick loop. Heavy lifting (hundreds
+    of Sepolia transfers via tsx subprocess) happens off the asyncio
+    loop in a worker thread so it never blocks dialogue events or
+    position broadcasts.
+    """
+    import os
+
+    raw = os.environ.get("CITYSIM_DAILY_WAGES", "1").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return
+    try:
+        # Lazy import — economy module pulls in eth_account / sqlite
+        # which we don't want at server-cold-boot time.
+        from citysim.economy.distribute import pay_daily_wages
+
+        await asyncio.to_thread(pay_daily_wages, sim_day)
+    except Exception:  # noqa: BLE001 - the show must go on
+        import traceback
+
+        traceback.print_exc()
+
+
 async def _emit_day_summary(sim: SimState, day: int) -> None:
     """Aggregate the day's events from the log, print to stdout, and
     broadcast a ``day_summary`` WebSocket message so the viewer can show
@@ -554,6 +580,10 @@ async def tick_loop(sim: SimState) -> None:
                     )
                 # Emit per-day summary, then reset live counters.
                 await _emit_day_summary(sim, ended_day)
+                # Pay daily SIMCITY wages for the day that just ended.
+                # Fire-and-forget so the multi-thousand-tx airdrop doesn't
+                # block the tick loop. Idempotent on last_wage_day.
+                asyncio.create_task(_pay_daily_wages_async(ended_day))
                 sim.stats = _empty_stats()
                 sim.run.dialogues_today = 0
                 sim.run.days_completed += 1

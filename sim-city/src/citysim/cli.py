@@ -882,3 +882,84 @@ def bootstrap_all(
     proc = subprocess.run(cmd, check=False, text=True)
     if proc.returncode != 0:
         raise typer.Exit(proc.returncode)
+
+
+@app.command(name="distribute-savings")
+def distribute_savings_cmd(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print what would be sent without spending Sepolia ETH."
+    ),
+    batch_size: int = typer.Option(
+        200, "--batch-size", help="How many transfers per subprocess invocation."
+    ),
+) -> None:
+    """One-time SIMCITY airdrop: 10% of every persona's annual wage.
+
+    Reads each persona's age + occupation from the SQLite store, derives a
+    USD-equivalent annual wage from the BLS-rooted salary table, and sends
+    initial_savings = annual_wage × 10% as SIMCITY tokens to their wallet.
+    Idempotent: re-running picks up only personas that haven't been paid.
+    """
+    from citysim.economy.distribute import distribute_initial_savings
+
+    typer.secho("SIMCITY initial-savings airdrop", fg=typer.colors.CYAN, bold=True)
+    if dry_run:
+        typer.secho("(dry run — no on-chain txs will be sent)", fg=typer.colors.YELLOW)
+
+    summary = distribute_initial_savings(
+        dry_run=dry_run,
+        batch_size=batch_size,
+        progress=lambda m: typer.echo(f"  · {m}"),
+    )
+    typer.echo("")
+    typer.secho("Done.", fg=typer.colors.GREEN, bold=True)
+    for k, v in summary.items():
+        typer.echo(f"  {k:<18} = {v}")
+
+
+@app.command(name="pay-daily-wages")
+def pay_daily_wages_cmd(
+    sim_day: int = typer.Argument(..., help="Sim day_of_year to pay wages for."),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    batch_size: int = typer.Option(200, "--batch-size"),
+) -> None:
+    """Pay every persona their daily wage (annual_wage / 365) for one sim-day.
+
+    Normally invoked automatically by the simulator's day-rollover hook;
+    exposed as a CLI for ops / catch-up runs / dry-run dollar-counting.
+    """
+    from citysim.economy.distribute import pay_daily_wages
+
+    typer.secho(f"SIMCITY daily wage — sim_day={sim_day}", fg=typer.colors.CYAN, bold=True)
+    if dry_run:
+        typer.secho("(dry run — no on-chain txs will be sent)", fg=typer.colors.YELLOW)
+    summary = pay_daily_wages(
+        sim_day,
+        dry_run=dry_run,
+        batch_size=batch_size,
+        progress=lambda m: typer.echo(f"  · {m}"),
+    )
+    typer.echo("")
+    typer.secho("Done.", fg=typer.colors.GREEN, bold=True)
+    for k, v in summary.items():
+        typer.echo(f"  {k:<18} = {v}")
+
+
+@app.command(name="show-economy")
+def show_economy_cmd() -> None:
+    """Print a per-occupation salary projection table (no on-chain calls)."""
+    from citysim.economy.salary import OCCUPATION_BASE_SALARY, age_factor
+
+    typer.secho("Per-occupation baseline (USD/year)", fg=typer.colors.CYAN, bold=True)
+    rows = sorted(OCCUPATION_BASE_SALARY.items(), key=lambda kv: -kv[1])
+    for occ, base in rows:
+        daily = base / 365
+        savings = base * 0.10
+        typer.echo(
+            f"  {occ:<18} base={base:>9,.0f}  daily={daily:>6,.2f}  "
+            f"initial_savings(10%)={savings:>8,.0f}"
+        )
+    typer.echo("")
+    typer.secho("Age-curve factor", fg=typer.colors.CYAN, bold=True)
+    for age in [10, 15, 17, 18, 22, 25, 30, 35, 45, 60, 65, 68, 75]:
+        typer.echo(f"  age={age:<3}  factor={age_factor(age):.2f}")
